@@ -11,7 +11,7 @@ import torch
 from transformers import BertTokenizer
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', type=str, default='Tweets')
+parser.add_argument('--dataset', type=str, default='Restaurants')
 parser.add_argument('--emb_dim', type=int, default=300, help='Word embedding dimension.')
 parser.add_argument('--post_dim', type=int, default=30, help='Position embedding dimension.')
 parser.add_argument('--pos_dim', type=int, default=30, help='Pos embedding dimension.')
@@ -31,13 +31,13 @@ parser.add_argument('--num_epoch', type=int, default=100, help='Number of total 
 parser.add_argument('--batch_size', type=int, default=32, help='Training batch size.')
 parser.add_argument('--log_step', type=int, default=80, help='Print log every k steps.')
 parser.add_argument('--log', type=str, default='logs.txt', help='Write training log to file.')
-parser.add_argument('--save_dir', type=str, default='./saved_models/best_model_tweet_bert_78.49.pt', help='Root dir for saving models.')
+parser.add_argument('--save_dir', type=str, default='./saved_models/glove/best_model.pt', help='Root dir for saving models.')
 parser.add_argument('--optimizer', type=str, default='Adma', help='Adma; SGD')
 parser.add_argument('--threshold', type=float, default=0.3)
 parser.add_argument('--head_num', default=3, type=int, help='head_num must be a multiple of 3')
 
 # bert
-parser.add_argument('--emb_type', type=str, default='bert', help='[glove, bert]')
+parser.add_argument('--emb_type', type=str, default='glove', help='[glove, bert]')
 parser.add_argument('--bert_lr', type=float, default=2e-5)
 parser.add_argument('--bert_model_dir', type=str, default='../bert_model')
 parser.add_argument('--DEVICE', type=int, default=0, help='GPU number')

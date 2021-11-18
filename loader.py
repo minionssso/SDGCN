@@ -44,7 +44,7 @@ class DataLoader(object):
                 post = [i-aspect['from'] for i in range(aspect['from'])] \
                        + [0 for _ in range(aspect['from'], aspect['to'])] \
                        + [i-aspect['to']+1 for i in range(aspect['to'], length)]
-                # mask of aspect
+                # mask of aspect, asp的位置=1
                 if len(asp) == 0:
                     mask = [1 for _ in range(length)]    # for rest16
                 else:

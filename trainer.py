@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from gcn import GCNClassifier
+import math
 
 
 class GCNTrainer(object):
@@ -10,7 +11,7 @@ class GCNTrainer(object):
         self.args = args
         self.emb_matrix = emb_matrix
         self.model = GCNClassifier(args, emb_matrix=emb_matrix).to(self.args.device)
-
+        self.metric = 0
         if args.emb_type == 'bert':
             bert_model = self.model.gcn_model.bert
             bert_params_dict = list(map(id, bert_model.parameters()))
@@ -23,7 +24,10 @@ class GCNTrainer(object):
             self.parameters = self.model.parameters()
 
         self.optimizer = torch.optim.Adam(
-                self.parameters, lr=args.lr, weight_decay=args.l2reg)
+                self.parameters, lr=args.lr, weight_decay=args.l2reg, amsgrad=True)
+
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1, gamma=0.9)  # step_size=epoch
+        # new_lr = old_lr * gamma
 
     # load model
     def load(self, filename):
@@ -88,3 +92,10 @@ class GCNTrainer(object):
         return loss.data, acc, predictions, \
                label.data.cpu().numpy().tolist(), predprob, \
                gcn_outputs.data.cpu().numpy()
+
+    def step_decay(self, epoch):
+        initial_lr = self.args.lr
+        drop = 0.5
+        epochs_drop = 5.0
+        lrate = initial_lr * math.pow(drop, math.floor((1+epoch)/epochs_drop))
+        return lrate
