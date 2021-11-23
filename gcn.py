@@ -192,7 +192,7 @@ class GCNAbsaModel(nn.Module):
         h = self.alpha * h_syn_final + (1 - self.alpha) * h_sem_final
 
         # linear
-        outputs = F.tanh(self.linear(h))
+        outputs = torch.tanh(self.linear(h))  # F.tanh
         # activa = nn.LeakyReLU(0.1)
         # outputs = activa(self.linear(h))
         return outputs, h_syn_final, h_sem_final
