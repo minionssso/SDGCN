@@ -1,9 +1,12 @@
 import json
 import random
+import spacy
 import torch
 import numpy as np
+from spacy.tokens import Doc
 from tree import Tree, head_to_tree, tree_to_adj
 from torch.nn.utils.rnn import pad_sequence
+import networkx as nx
 
 
 class DataLoader(object):
@@ -23,23 +26,24 @@ class DataLoader(object):
         self.data = data
         print("{} batches created for {}".format(len(data), filename))
 
-    def preprocess(self, data, dicts):
+    def preprocess(self, data, dicts):  # data:每个list带有5个dict{token,pos,head,deprel,asp} TODO 可以再加一个dep_dist
         
         processed = []
-
         for d in data:
             for aspect in d['aspects']:
                 # word token
                 tok = list(d['token'])
-                if self.args.lower == True:
+                if self.args.lower:
                     tok = [t.lower() for t in tok]
-                
-                asp = list(aspect['term']) # aspect
-                label = aspect['polarity'] # label 
-                pos = list(d['pos'])       # pos
-                head = list(d['head'])     # head
-                dep = list(d['deprel'])    #deprel
-                length = len(tok)          # real length
+                asp = list(aspect['term'])  # aspect
+                terms_id = [aspect['from']] if aspect['from'] == (aspect['to']-1) else [aspect['from'], aspect['to']-1]
+                label = aspect['polarity']  # label
+                pos = list(d['pos'])        # pos
+                head = list(d['head'])      # head
+                dep = list(d['deprel'])     # deprel
+                length = len(tok)           # real length
+                # dep_dist
+                _, dist = calculate_dep_dist(tok, asp, terms_id)
                 # position
                 post = [i-aspect['from'] for i in range(aspect['from'])] \
                        + [0 for _ in range(aspect['from'], aspect['to'])] \
@@ -71,15 +75,17 @@ class DataLoader(object):
                             and len(pos) == length \
                             and len(head) == length \
                             and len(post) == length \
-                            and len(mask) == length
+                            and len(mask) == length \
+                            and len(dist) == length
                 elif self.args.emb_type == "bert":
                     assert len(pos) == length \
                             and len(head) == length \
                             and len(post) == length \
-                            and len(mask) == length
+                            and len(mask) == length \
+                            and len(dist) == length
 
                 if self.args.emb_type == "glove":
-                    processed += [(tok, asp, pos, head, dep, post, mask, length, label)]
+                    processed += [(tok, asp, pos, head, dep, post, mask, length, label, dist)]
                 elif self.args.emb_type == "bert":
                     processed += [(tok, asp, pos, head, dep, post, mask, length, word_idx, segment_ids, label)]
 
@@ -197,6 +203,7 @@ def map_to_ids(tokens, vocab):
     ids = [vocab[t] if t in vocab else 1 for t in tokens] # the id of [UNK] is ``1''
     return ids
 
+
 def get_long_tensor(tokens_list, batch_size):
     """ Convert list of list of tokens to a padded LongTensor. """
     token_len = max(len(x) for x in tokens_list)
@@ -204,6 +211,7 @@ def get_long_tensor(tokens_list, batch_size):
     for i, s in enumerate(tokens_list):
         tokens[i, :len(s)] = torch.LongTensor(s)
     return tokens
+
 
 def get_float_tensor(tokens_list, batch_size):
     """ Convert list of list of tokens to a padded FloatTensor. """
@@ -213,8 +221,57 @@ def get_float_tensor(tokens_list, batch_size):
         tokens[i, :len(s)] = torch.FloatTensor(s)
     return tokens
 
+
 def sort_all(batch, lens):
     """ Sort all fields by descending order of lens, and return the original indices. """
     unsorted_all = [lens] + [range(len(lens))] + list(batch)
     sorted_all = [list(t) for t in zip(*sorted(zip(*unsorted_all), reverse=True))]
     return sorted_all[2:], sorted_all[1]
+
+
+class WhitespaceTokenizer(object):
+    # 重写spcy的分词（空格完成分词）
+    def __init__(self, vocab):
+        self.vocab = vocab
+
+    def __call__(self, text):
+        words = text.split()
+        # All tokens 'own' a subsequent space character in this tokenizer
+        spaces = [True] * len(words)
+        return Doc(self.vocab, words=words, spaces=spaces)
+
+
+nlp = spacy.load("en_core_web_sm")  # 得到句法依赖树的工具
+
+nlp.tokenizer = WhitespaceTokenizer(nlp.vocab)
+
+
+# 计算依赖树词距离
+def calculate_dep_dist(tok, aspect, terms_id):
+    sent = ' '
+    sent = sent.join(tok)
+    doc = nlp(sent)
+    # Load spacy's dependency tree into a networkx graph
+    edges = []
+    # term_ids = [0] * len(aspect)
+    for token in doc:  # 遍历句子中的token
+        for child in token.children:  # 遍历所有token，提取和边child的关系
+            edges.append(('{}_{}'.format(token.lower_, token.i),
+                          '{}_{}'.format(child.lower_, child.i)))
+
+    graph = nx.Graph(edges)
+
+    dist = [0.0]*len(doc)
+    text = [0]*len(doc)
+    for i, word in enumerate(doc):
+        source = '{}_{}'.format(word.lower_, word.i)
+        sum = 0
+        for term_id, term in zip(terms_id, aspect):
+            target = '{}_{}'.format(term, term_id)
+            try:
+                sum += nx.shortest_path_length(graph, source=source, target=target)  # 求最短路径长度
+            except:
+                sum += len(doc)  # No connection between source and target
+        dist[i] = sum/len(aspect)  # 多个asp token分别和句子token之间的距离，再除以asp token的数量
+        text[i] = word.text
+    return text, dist

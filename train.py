@@ -15,7 +15,7 @@ from trainer import GCNTrainer
 from transformers import BertTokenizer
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', type=str, default='Laptops', help='[Restaurants, Tweets, Laptops]')
+parser.add_argument('--dataset', type=str, default='Restaurants', help='[Restaurants, Tweets, Laptops]')
 parser.add_argument('--post_dim', type=int, default=30, help='Position embedding dimension.')
 parser.add_argument('--pos_dim', type=int, default=30, help='Pos embedding dimension.')
 parser.add_argument('--dep_dim', type=int, default=30, help='Deprel embedding dimension')
@@ -89,19 +89,19 @@ if args.emb_type == "bert":
     args.tokenizer.model_max_length = 90
     args.emb_dim = 768
 
-fitlog.set_log_dir("logs/Laptops")         # TODO 设定日志存储的目录
+fitlog.set_log_dir("logs")         # TODO 设定日志存储的目录
 for arg, value in sorted(six.iteritems(vars(args))):
     fitlog.add_hyper({arg: value})  # 通过这种方式记录ArgumentParser的参数
 
 dicts['token'] = token_vocab['w2i']
 
-# load training set and test set
+# load training set and test set  # TODO 想把dep_dist也放进来
 print("Loading data from {} with batch size {}...".format(args.dataset, args.batch_size))
 train_batch = [batch for batch in DataLoader(
                 './dataset/'+args.dataset+'/train.json', args.batch_size, args, dicts)]
 test_batch = [batch for batch in DataLoader(
                 './dataset/'+args.dataset+'/test.json', args.batch_size, args, dicts)]
-
+# 当实例对象通过[]运算符取值时，会调用它的__getitem__()
 # create the folder for saving the best models and log file
 model_save_dir = args.save_dir
 helper.ensure_dir(model_save_dir, verbose=True)

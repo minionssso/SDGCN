@@ -17,7 +17,7 @@ class GCNClassifier(nn.Module):
         self.args = args
         self.in_dim = args.hidden_dim
         self.gcn_model = GCNAbsaModel(args, emb_matrix=emb_matrix)
-        self.classifier = nn.Linear(self.in_dim, args.num_class)
+        self.classifier = nn.Linear(self.in_dim, args.num_class)  # 最后得到3分类
 
     def forward(self, inputs):
         outputs, h_syn, h_sem = self.gcn_model(inputs)
@@ -42,8 +42,8 @@ class GCNAbsaModel(nn.Module):
 
         self.in_drop = nn.Dropout(args.input_dropout)
 
-        # create embedding layers
-        self.emb = nn.Embedding(args.token_vocab_size, args.emb_dim, padding_idx=0)
+        # create embedding layers Glove词嵌入emb
+        self.emb = nn.Embedding(args.token_vocab_size, args.emb_dim, padding_idx=0)  # 如果没有emb_matrix就随机生成
         if emb_matrix is not None:
             self.emb.weight = nn.Parameter(emb_matrix.to(self.args.device), requires_grad=False)
 
@@ -52,14 +52,14 @@ class GCNAbsaModel(nn.Module):
         self.post_emb = nn.Embedding(args.post_vocab_size, args.post_dim, padding_idx=0) \
                                     if args.post_dim > 0 else None  # position emb
 
-        # rnn layer
+        # rnn layer=Bi-LSTM
         self.in_dim = args.emb_dim + args.post_dim + args.pos_dim
         if self.args.emb_type == 'bert':
             self.dense = nn.Linear(self.in_dim, args.rnn_hidden * 2)
         else:
             self.rnn = nn.LSTM(self.in_dim, args.rnn_hidden, 1, batch_first=True, bidirectional=True)
 
-        # # multi-head attention
+        # multi-head attention, 句法依赖树提取特征会有错误，因此提出K头余弦相似度，捕捉语义关系来补充语法信息
         self.cos_attn_adj = KHeadAttnCosSimilarity(args.head_num,
                                                     2 * args.hidden_dim,
                                                     args.threshold)
@@ -70,29 +70,31 @@ class GCNAbsaModel(nn.Module):
         # gate weight
         self.w_syn = nn.ParameterList()
         self.w_sem = nn.ParameterList()
-
+        
+        # GCN层, syn GCN + sem GCN
         self.gcn_syn.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim))
         self.gcn_sem.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim))
         for i in range(1, self.args.num_layers):
             self.gcn_syn.append(GCN(args, args.hidden_dim, args.hidden_dim))
             self.gcn_sem.append(GCN(args, args.hidden_dim, args.hidden_dim))
             self.w_syn.append(nn.Parameter(
-                torch.FloatTensor(args.hidden_dim, args.hidden_dim).normal_(0, 1)))
+                torch.FloatTensor(args.hidden_dim, args.hidden_dim).normal_(0, 1)))  # 正态分布
             self.w_sem.append(nn.Parameter(
                 torch.FloatTensor(args.hidden_dim, args.hidden_dim).normal_(0, 1)))
-
+        # Hierarchical aspect—based attention
         self.syn_attn = TimeWiseAspectBasedAttn(args.hidden_dim, args.num_layers)
         self.sem_attn = TimeWiseAspectBasedAttn(args.hidden_dim, args.num_layers)
 
-        # AM attention
+        # AM attention，映射到1维
         self.attn = Attention(2 * args.hidden_dim, args.hidden_dim)
 
-        # learnable hyperparameter
+        # learnable hyperparameter，最后的 α
         self.alpha = nn.Parameter(torch.tensor(0.5))
 
         # fully connect Layer
         self.linear = nn.Linear(2 * args.hidden_dim, args.hidden_dim)
 
+    # 拼接三种词嵌入
     def create_embs(self, tok, pos, post):
         # embedding
         word_embs = self.emb(tok)
@@ -102,7 +104,7 @@ class GCNAbsaModel(nn.Module):
         if self.args.post_dim > 0:
             embs += [self.post_emb(post)]
         embs = torch.cat(embs, dim=2)
-        embs = self.in_drop(embs)
+        embs = self.in_drop(embs)  # input_dropout
         return embs
 
     def create_bert_embs(self, tok, pos, post, word_idx, segment_ids):
@@ -119,27 +121,41 @@ class GCNAbsaModel(nn.Module):
         embs = self.in_drop(embs)
         return embs
 
+    # Bi-LSTM，input：embs, length, embs.size(0)
     def encode_with_rnn(self, rnn_inputs, seq_lens, batch_size):
-        h0, c0 = rnn_zero_state(self.args, batch_size, 1, True)
-        rnn_inputs = pack_padded_sequence(rnn_inputs, seq_lens.cpu(), batch_first=True)
+        h0, c0 = rnn_zero_state(self.args, batch_size, 1, True)  # 1=一层RNN
+        rnn_inputs = pack_padded_sequence(rnn_inputs, seq_lens.cpu(), batch_first=True)  # 输入压缩为可变长序列。先打包再填充
         rnn_outputs, (_, _) = self.rnn(rnn_inputs, (h0, c0))
         rnn_outputs, _ = pad_packed_sequence(rnn_outputs, batch_first=True)
         return rnn_outputs
 
     def create_adj_mask(self, rnn_hidden):
-        score_mask = torch.matmul(rnn_hidden, rnn_hidden.transpose(-2, -1))
-        score_mask = (score_mask == 0)
+        score_mask = torch.matmul(rnn_hidden, rnn_hidden.transpose(-2, -1))  # 句子自己和自己相乘，也就是句子里每个词都和别的词乘一遍，做相似度计算呢？
+        # from torchvision import transforms
+        # unloader = transforms.ToPILImage()
+        # for i, s in enumerate(score_mask):
+        #     image = s.cpu().clone()  # clone the tensor
+        #     # image = image.squeeze(0)  # remove the fake batch dimension
+        #     image = unloader(image)
+        #     image.save('score_mask_{}.jpg'.format(i))
+        # for hid, s in zip(rnn_hidden, score_mask):
+            # h_len = (hid != 0).size(0)
+            # s_len = (s != 0).size(0)
+            # h_len = torch.sum(hid != 0, dim=0)[0]
+            # s_len = torch.sum(s != 0, dim=0)[0]
+            # assert h_len == s_len
+        score_mask = (score_mask == 0)  # =0的值为True
         return score_mask
 
     def graph_comm(self, h0, w, h1, score_mask):
-        # H = softmax(h1 * w * h2)
+        # H = softmax(h0 * w * h1) 公式(13、14)
         H = torch.matmul(h0, w)
         H = torch.matmul(H, h1.transpose(-2, -1))
         H = H.masked_fill(score_mask, -1e10)  # masked
         b = ~score_mask[:, :, 0:1]
         H = F.softmax(H, dim=-1) * b.float()
 
-        # h = h0 + H * h1
+        # h = h0 + H * h1 公式(11、12)(15、16)
         h = h0 + torch.matmul(H, h1)
         return h
 
@@ -157,22 +173,22 @@ class GCNAbsaModel(nn.Module):
             hidden = self.Dense(embs, length)
         else:
             tok, asp, pos, head, post, dep, asp_mask, length, adj = inputs       # unpack inputs
-            # embedding
-            embs = self.create_embs(tok, pos, post)
-            # bi-lstm encoding
-            hidden = self.encode_with_rnn(embs, length, embs.size(0))  # [batch_size, seq_len, hidden]
+            # 三重embedding
+            embs = self.create_embs(tok, pos, post)  # 拼接三种词嵌入：Glove+POS(词性标注)+位置嵌入 (bs,seq_len,emb_dim+pos_dim+post_dim)
+            # Bi-LSTM encoding
+            hidden = self.encode_with_rnn(embs, length, embs.size(0))  # [batch_size, seq_len, rnn_hidden*2]
+            # bi-lism 句子级特征提取
+        score_mask = self.create_adj_mask(hidden)  # score_mask=0的值为True，等于0表示词之间完全不相关嘛，句子之间做相似度计算呢？
 
-        score_mask = self.create_adj_mask(hidden)
-
-        # cosine adj matrix
+        # cosine adj matrix、KHeadAttnCosSimilarity 捕获语义相似度
         cos_adj = self.cos_attn_adj(hidden, score_mask)  # [batch_size, head_num, seq_len, seq_len]
-        cos_adj = torch.sum(cos_adj, dim=1) / self.args.head_num
+        cos_adj = torch.sum(cos_adj, dim=1) / self.args.head_num  # 4头求平均，公式（6）
 
-        h_syn = []
+        h_syn = []  # 保存三层GCN的输出
         h_sem = []
         # GCN encoding
-        h_syn.append(self.gcn_syn[0](adj, hidden, score_mask, first_layer=True))
-        h_sem.append(self.gcn_sem[0](cos_adj, hidden, score_mask, first_layer=True))
+        h_syn.append(self.gcn_syn[0](adj, hidden, score_mask, first_layer=True))  # 句法图和BiLSTM输出，一起输入三层SynGCN
+        h_sem.append(self.gcn_sem[0](cos_adj, hidden, score_mask, first_layer=True))  # 语法图和BiLSTM输出，一起输入三层SemGCN
         for i in range(self.args.num_layers - 1):
             # graph communication layer
             h_syn_ = self.graph_comm(h_syn[i], self.w_syn[i], h_sem[i], score_mask)
@@ -184,7 +200,7 @@ class GCNAbsaModel(nn.Module):
         h_syn = torch.stack(h_syn, dim=0)
         h_sem = torch.stack(h_sem, dim=0)
 
-        # time-wise aspect-based attention
+        # time-wise aspect-based attention 基于时间方面的注意
         h_syn_final = self.syn_attn(h_syn[:-1], h_syn[-1], asp_mask, score_mask)
         h_sem_final = self.sem_attn(h_sem[:-1], h_sem[-1], asp_mask, score_mask)
 
@@ -198,6 +214,7 @@ class GCNAbsaModel(nn.Module):
         return outputs, h_syn_final, h_sem_final
 
 
+# 构造h0，c0的0矩阵
 def rnn_zero_state(args, batch_size, num_layers, bidirectional=True):
     total_layers = num_layers * 2 if bidirectional else num_layers
     state_shape = (total_layers, batch_size, args.rnn_hidden)
@@ -212,19 +229,27 @@ class GCN(nn.Module):
         self.drop = nn.Dropout(args.gcn_dropout)
 
         # gcn layer
-        self.W = nn.Linear(input_dim, output_dim, bias=False)
+        self.W = nn.Linear(input_dim, output_dim, bias=False)  # 是否加bias
 
     def forward(self, adj, inputs, score_mask, first_layer=True):
-        # gcn
-        denom = adj.sum(2).unsqueeze(2) + 1  # norm adj
+        # gcnlog  ASGCN公式（2）（3）
+        # 画出邻接矩阵
+        # from torchvision import transforms
+        # unloader = transforms.ToPILImage()
+        # for i, s in enumerate(adj):
+        #     image = s.cpu().clone()  # clone the tensor
+        #     # image = image.squeeze(0)  # remove the fake batch dimension
+        #     image = unloader(image)
+        #     image.save('./pictures/adj_{}.jpg'.format(i))
+        denom = adj.sum(2).unsqueeze(2) + 1  # norm adj 度矩阵：表示连接节点数
         Ax = adj.bmm(inputs)
         AxW = self.W(Ax)
         AxW = AxW / denom
         gAxW = F.relu(AxW)
         out = gAxW if first_layer else self.drop(gAxW)
-        return out
+        return out  # （16,41,204)
 
-
+# 提取语义关系，补充句法信息
 class KHeadAttnCosSimilarity(nn.Module):
     def __init__(self, head_num, input_dim, threshold):
         super(KHeadAttnCosSimilarity, self).__init__()
@@ -240,6 +265,7 @@ class KHeadAttnCosSimilarity(nn.Module):
     # create cosine similarity adj matrix
     # sem_embs: [batch_size, head_num, seq_len, d_k]
     # score_mask: [batch_size, head_num, seq_len, seq_len]
+    # 公式（7）
     def create_cos_adj(self, sem_embs, score_mask):
         seq_len = sem_embs.size(2)
 
@@ -247,11 +273,19 @@ class KHeadAttnCosSimilarity(nn.Module):
         a = sem_embs.unsqueeze(3)  # [batch_size, head_num, seq_len, 1, d_k]
         b = sem_embs.unsqueeze(2).repeat(1, 1, seq_len, 1, 1)  # [batch_size, head_num, seq_len, seq_len, d_k]
         cos_similarity = F.cosine_similarity(a, b, dim=-1)  # [batch_size, head_num, seq_len, seq_len]
-        cos_similarity = cos_similarity * (~score_mask).float()  # mask
-
+        cos_similarity = cos_similarity * (~score_mask).float()  # mask,score_mask=True的地方mask为0,反转false=0
+        # 消除不是句子成分的影响，pad的影响
         # keep the value larger than threshold as the connection
         cos_adj = (cos_similarity > self.threshold).float()
-        return cos_adj
+        # from torchvision import transforms
+        # unloader = transforms.ToPILImage()
+        # for i, s in enumerate(cos_adj):
+        #     for j, c in enumerate(s):
+        #         image = c.cpu().clone()  # clone the tensor
+        #         # image = image.squeeze(0)  # remove the fake batch dimension
+        #         image = unloader(image)
+        #         image.save('cos_adj_{}_{}.jpg'.format(i, j))
+        return cos_adj  # 公式（7）的结果ai,j
 
     # attn = ((QW)(KW)^T)/sqrt(d)
     # query, key: [batch_size, seq_len, hidden_dim]
@@ -264,33 +298,33 @@ class KHeadAttnCosSimilarity(nn.Module):
                       for l, x in zip(self.linears, (query, key))]
         scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.d_k)  # [batch_size, head_num, seq_len, seq_len]
 
-        scores = scores.masked_fill(score_mask, -1e10)
-        p_attn = F.softmax(scores, dim=-1)  # [batch_size, head_num, seq_len, seq_len]
+        scores = scores.masked_fill(score_mask, -1e10)  # score=True的地方（即为0的地方）用-1e10代替,softmax一下≈0
+        p_attn = F.softmax(scores, dim=-1)  # [batch_size, head_num, seq_len, seq_len]  出来的权重都比较评价呢，没有起到atten的作用
 
-        b = ~score_mask[:, :, :, 0:1]
-        p_attn = p_attn * b.float()  # [batch_size, head_num, seq_len, 1]
-        return p_attn
+        b = ~score_mask[:, :, :, 0:1]  # Fasle为0，score_mask正方体，提取第一个：后面的长度都一样
+        p_attn = p_attn * b.float()  # [batch_size, head_num, seq_len, 1] 广播机制
+        return p_attn  # [batch_size, head_num, seq_len, seq_len]
 
     # embs: [batch_size, seq_len, input_dim]
     # score_mask: [batch_size, seq_len, seq_len]
     def forward(self, embs, score_mask):
         batch_size = embs.size(0)
         seq_len = embs.size(1)
-        score_mask = score_mask.unsqueeze(1).repeat(1, self.head_num, 1, 1)  # [batch_size, head_num, seq_len, seq_len]
+        score_mask = score_mask.unsqueeze(1).repeat(1, self.head_num, 1, 1)  # [batch_size, head_num, seq_len, seq_len] 复制head_num个score_mask
 
-        embs_mapped = self.mapping(embs)  # [batch_size, seq_len, input_dim]
+        embs_mapped = self.mapping(embs)  # 公式（4），过Linear，[batch_size, seq_len, input_dim]
         sem_embs = embs_mapped.view(batch_size, seq_len, self.head_num, self.d_k)\
-                            .transpose(1, 2)  # [batch_size, head_num, seq_len, d_k]
+                            .transpose(1, 2)  # [batch_size, head_num, seq_len, d_k] 分成四个头
 
-        K_head_cosine = self.create_cos_adj(sem_embs, score_mask)   # [batch_size, head_num, seq_len, seq_len]
+        K_head_cosine = self.create_cos_adj(sem_embs, score_mask)   # 公式（7）[batch_size, head_num, seq_len, seq_len]
 
         # multi-head attn for embs_mapped
-        attn = self.attention(embs_mapped, embs_mapped, score_mask)
+        attn = self.attention(embs_mapped, embs_mapped, score_mask)  # 公式（8）
 
         K_head_attn_cosine = K_head_cosine * attn
-        return K_head_attn_cosine
+        return K_head_attn_cosine  # 返回公式（6），未求平均前
 
-
+# Hierarchical aspect—based attention
 class TimeWiseAspectBasedAttn(nn.Module):
     def __init__(self, hidden_dim, num_layers):
         super(TimeWiseAspectBasedAttn, self).__init__()
@@ -303,26 +337,26 @@ class TimeWiseAspectBasedAttn(nn.Module):
     def forward(self, h, h_T, asp_mask, score_mask):
         h_T_ = h_T.unsqueeze(0).repeat(self.num_layers - 1, 1, 1, 1)  # [num_layers - 1, batch_size, seq_len, hidden_dim]
         a0 = torch.sum(h * h_T_, dim=-1, keepdim=True)
-        a0 = F.softmax(a0, dim=0)
+        a0 = F.softmax(a0, dim=0)  # 第0维，1层和3层权重，2层和3层权重，哪个大
 
-        h_weighted = torch.sum(a0 * h, dim=0) + h_T
+        h_weighted = torch.sum(a0 * h, dim=0) + h_T  # 公式（20）
 
         # avg pooling asp and context fearure
         # mask: [batch_size, seq_len]
-        asp_wn = asp_mask.sum(dim=1, keepdim=True)  # aspect words num  [batch_size, 1]
+        asp_wn = asp_mask.sum(dim=1, keepdim=True)  # asp_len  [batch_size, 1]
         asp_mask = asp_mask.unsqueeze(-1).repeat(1, 1, self.hidden_dim)  # mask for h:[batch_size, seq_len, hidden_dim]
 
-        aspect = (h_weighted * asp_mask).sum(dim=1) / asp_wn  # [batch_size, hidden_dim]
-        context = h_weighted * (asp_mask == 0).float()  # [batch_size, seq_len, hidden_dim]
+        aspect = (h_weighted * asp_mask).sum(dim=1) / asp_wn  # [batch_size, hidden_dim]  公式（21）
+        context = h_weighted * (asp_mask == 0).float()  # [batch_size, seq_len, hidden_dim] 公式（22）
 
         # aspect based attn
         # aspect x self.W x context
-        a1 = torch.matmul(aspect.unsqueeze(1), self.W)  # [batch_size, 1, hidden_dim]
+        a1 = torch.matmul(aspect.unsqueeze(1), self.W)  # [batch_size, 1, hidden_dim] 公式（23）
         a1 = torch.matmul(a1, context.transpose(1, 2)).transpose(1, 2)  # [batch_size, seq_len, 1]
         a1 = torch.softmax(a1.masked_fill(score_mask[:, :, 0:1], -1e10), dim=1)
 
         # weighted and add
-        context_weighted_vec = torch.sum(a1 * context, dim=1)  # [batch_size, hidden_dim]
+        context_weighted_vec = torch.sum(a1 * context, dim=1)  # [batch_size, hidden_dim]  公式（24），求和没有除以长度
 
         output = torch.cat((context_weighted_vec, aspect), dim=-1)  # [batch_size, 2 * hidden_dim]
         return output
