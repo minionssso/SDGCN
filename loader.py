@@ -22,7 +22,7 @@ class DataLoader(object):
         data = self.preprocess(data, dicts)
 
         # chunk into batches
-        data = [data[i:i+batch_size] for i in range(0, len(data), batch_size)]
+        data = [data[i:i+batch_size] for i in range(0, len(data), batch_size)]  # split batchs
         self.data = data
         print("{} batches created for {}".format(len(data), filename))
 
@@ -85,9 +85,9 @@ class DataLoader(object):
                             and len(dist) == length
 
                 if self.args.emb_type == "glove":
-                    processed += [(tok, asp, pos, head, dep, post, mask, length, label, dist)]
+                    processed += [(tok, asp, pos, head, dep, post, mask, length, dist, label)]
                 elif self.args.emb_type == "bert":
-                    processed += [(tok, asp, pos, head, dep, post, mask, length, word_idx, segment_ids, label)]
+                    processed += [(tok, asp, pos, head, dep, post, mask, length, word_idx, segment_ids, dist, label)]
 
         return processed
 
@@ -164,9 +164,9 @@ class DataLoader(object):
         batch = list(zip(*batch))
         
         # sort all fields by lens for easy RNN operations
-        batch, orig_idx = sort_all(batch, batch[7])
+        batch, orig_idx = sort_all(batch, batch[7])  # token, seq_len
 
-        # convert to tensors
+        # convert to tensors, 填充为同batch一样长
         tok = get_long_tensor(batch[0], batch_size).to(self.args.device)
         asp = get_long_tensor(batch[1], batch_size).to(self.args.device)
         pos = get_long_tensor(batch[2], batch_size).to(self.args.device)
@@ -178,6 +178,7 @@ class DataLoader(object):
         if self.args.emb_type == "bert":
             word_idx = get_long_tensor(batch[8], batch_size).to(self.args.device)
             segment_ids = get_long_tensor(batch[9], batch_size).to(self.args.device)
+        dist = get_float_tensor(batch[-2], batch_size).to(self.args.device)
         label = torch.LongTensor(batch[-1]).to(self.args.device)
 
         def inputs_to_tree_reps(maxlen, head, words, l):
@@ -190,9 +191,9 @@ class DataLoader(object):
         adj = torch.tensor(inputs_to_tree_reps(maxlen, head, tok, length)).to(self.args.device)
 
         if self.args.emb_type == "glove":
-            return (tok, asp, pos, head, dep, post, mask, length, adj, label)
+            return (tok, asp, pos, head, dep, post, mask, length, adj, dist, label)
         elif self.args.emb_type == "bert":
-            return (tok, asp, pos, head, dep, post, mask, length, adj, word_idx, segment_ids, label)
+            return (tok, asp, pos, head, dep, post, mask, length, adj, word_idx, segment_ids, dist, label)
 
     def __iter__(self):
         for i in range(self.__len__()):
@@ -200,7 +201,7 @@ class DataLoader(object):
 
 
 def map_to_ids(tokens, vocab):
-    ids = [vocab[t] if t in vocab else 1 for t in tokens] # the id of [UNK] is ``1''
+    ids = [vocab[t] if t in vocab else 1 for t in tokens]  # the id of [UNK] is ``1''
     return ids
 
 

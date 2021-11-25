@@ -50,6 +50,9 @@ parser.add_argument('--emb_type', type=str, default='bert', help='[glove, bert]'
 parser.add_argument('--bert_lr', type=float, default=5e-5, help='5e-5, 3e-5, 2e-5')
 parser.add_argument('--bert_model_dir', type=str, default='./bert_model', help='Root dir for loading pretrained bert')
 parser.add_argument('--DEVICE', type=int, default=0, help='The number of GPU')
+# dist_mask
+parser.add_argument('--SRD', type=int, default=3, help='set SRD')
+parser.add_argument('--local_dist_focus', type=str, default='cdm', help='cdm or cdw')
 args = parser.parse_args()
 
 # set device
@@ -95,7 +98,7 @@ for arg, value in sorted(six.iteritems(vars(args))):
 
 dicts['token'] = token_vocab['w2i']
 
-# load training set and test set  # TODO 想把dep_dist也放进来
+# load training set and test set  # TODO 把dep_dist也放进来
 print("Loading data from {} with batch size {}...".format(args.dataset, args.batch_size))
 train_batch = [batch for batch in DataLoader(
                 './dataset/'+args.dataset+'/train.json', args.batch_size, args, dicts)]

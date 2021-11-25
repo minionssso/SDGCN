@@ -53,9 +53,9 @@ class GCNTrainer(object):
 
     def update(self, batch):
         if self.args.emb_type == "glove":
-            inputs = batch[0:9]  # 去除polarity tensor的输入
+            inputs = batch[0:10]  # 去除polarity tensor的输入
         elif self.args.emb_type == "bert":
-            inputs = batch[0:11]
+            inputs = batch[0:12]
         label = batch[-1]  # 最后一个就是polarity
 
         # step forward

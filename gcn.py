@@ -70,7 +70,11 @@ class GCNAbsaModel(nn.Module):
         # gate weight
         self.w_syn = nn.ParameterList()
         self.w_sem = nn.ParameterList()
-        
+
+        # mask gcn
+        self.mask_syn_gcn = GCN(args, args.rnn_hidden * 2, args.hidden_dim)
+        # PointwiseFeedForward
+        self.mean_pool = PointwiseFeedForward(self.args.hidden_dim*2, self.args.hidden_dim)
         # GCN层, syn GCN + sem GCN
         self.gcn_syn.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim))
         self.gcn_sem.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim))
@@ -166,13 +170,48 @@ class GCNAbsaModel(nn.Module):
         outputs, _ = pad_packed_sequence(inputs_unpad, batch_first=True)
         return outputs
 
+    # mask dep_dist
+    def feature_dynamic_mask(self, text, asp, distances_input=None):
+        texts = text.cpu()  # batch_size x seq_len
+        asps = asp.cpu()  # batch_size x aspect_len
+        if distances_input is not None:
+            distances_input = distances_input.cpu().numpy()
+        mask_len = self.args.SRD
+        masked_text_vec = np.ones((text.size(0), text.size(1), self.args.rnn_hidden),
+                                          dtype=np.float32)  # batch_size x seq_len x rnn hidden size*2
+        for text_i, asp_i in zip(range(len(texts)), range(len(asps))):  # For each sample
+            if distances_input is None:
+                asp_len = np.count_nonzero(asps[asp_i])  # Calculate aspect length
+                try:
+                    asp_begin = np.argwhere(texts[text_i] == asps[asp_i][0])[0][0]
+                except:
+                    continue
+                # Mask begin -> Relative position of an aspect vs the mask
+                if asp_begin >= mask_len:
+                    mask_begin = asp_begin - mask_len
+                else:
+                    mask_begin = 0
+                for i in range(mask_begin):  # Masking to the left
+                    masked_text_vec[text_i][i] = np.zeros(self.args.rnn_hidden, dtype=np.float)
+                for j in range(asp_begin + asp_len + mask_len, self.opt.max_seq_len): # Masking to the right
+                    masked_text_vec[text_i][j] = np.zeros(self.args.rnn_hidden, dtype=np.float)
+            else:
+                distances_i = distances_input[text_i][:len(texts[1])]  # 按行取
+                for i, dist in enumerate(distances_i):
+                    if dist > mask_len:
+                        masked_text_vec[text_i][i] = np.zeros(self.args.rnn_hidden, dtype=np.float)
+
+        masked_text_vec = torch.from_numpy(masked_text_vec)
+        return masked_text_vec.to(self.args.device)
+
+    # ############## Model ################
     def forward(self, inputs):
         if self.args.emb_type == "bert":
-            tok, asp, pos, head, post, dep, asp_mask, length, adj, word_idx, segment_ids = inputs
+            tok, asp, pos, head, dep, post, asp_mask, length, adj, word_idx, segment_ids = inputs
             embs = self.create_bert_embs(tok, pos, post, word_idx, segment_ids)
             hidden = self.Dense(embs, length)
         else:
-            tok, asp, pos, head, post, dep, asp_mask, length, adj = inputs       # unpack inputs
+            tok, asp, pos, head, dep, post, asp_mask, length, adj, dist = inputs       # unpack inputs
             # 三重embedding
             embs = self.create_embs(tok, pos, post)  # 拼接三种词嵌入：Glove+POS(词性标注)+位置嵌入 (bs,seq_len,emb_dim+pos_dim+post_dim)
             # Bi-LSTM encoding
@@ -186,9 +225,17 @@ class GCNAbsaModel(nn.Module):
 
         h_syn = []  # 保存三层GCN的输出
         h_sem = []
+        h_syn_mask = []  # 保存mask的输出
+
         # GCN encoding
         h_syn.append(self.gcn_syn[0](adj, hidden, score_mask, first_layer=True))  # 句法图和BiLSTM输出，一起输入三层SynGCN
         h_sem.append(self.gcn_sem[0](cos_adj, hidden, score_mask, first_layer=True))  # 语法图和BiLSTM输出，一起输入三层SemGCN
+        # mask gcn encoding
+        if self.args.local_dist_focus == 'cdm':
+            masked_text_vec = self.feature_dynamic_mask(hidden, asp, dist)
+            local_h_syn = torch.mul(h_syn[0], masked_text_vec)
+        h_syn_global_local = torch.cat((h_syn[0], local_h_syn), dim=-1)  # 方案2
+        h_syn[0] = self.mean_pool(h_syn_global_local)
         for i in range(self.args.num_layers - 1):
             # graph communication layer
             h_syn_ = self.graph_comm(h_syn[i], self.w_syn[i], h_sem[i], score_mask)
@@ -248,6 +295,7 @@ class GCN(nn.Module):
         gAxW = F.relu(AxW)
         out = gAxW if first_layer else self.drop(gAxW)
         return out  # （16,41,204)
+
 
 # 提取语义关系，补充句法信息
 class KHeadAttnCosSimilarity(nn.Module):
@@ -323,6 +371,7 @@ class KHeadAttnCosSimilarity(nn.Module):
 
         K_head_attn_cosine = K_head_cosine * attn
         return K_head_attn_cosine  # 返回公式（6），未求平均前
+
 
 # Hierarchical aspect—based attention
 class TimeWiseAspectBasedAttn(nn.Module):
@@ -407,3 +456,22 @@ class MultiHeadAttention(nn.Module):
         attn = self.attention(query, key, score_mask, dropout=self.dropout)
         return attn
 
+
+class PointwiseFeedForward(nn.Module):
+    ''' A two-feed-forward-layer module '''
+    def __init__(self, d_hid, d_inner_hid=None, d_out=None, dropout=0):
+        super(PointwiseFeedForward, self).__init__()
+        if d_inner_hid is None:
+            d_inner_hid = d_hid
+        if d_out is None:
+            d_out = d_inner_hid
+        self.w_1 = nn.Conv1d(d_hid, d_inner_hid, 1)  # position-wise
+        self.w_2 = nn.Conv1d(d_inner_hid, d_out, 1)  # position-wise
+        self.dropout = nn.Dropout(dropout)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        output = self.relu(self.w_1(x.transpose(1, 2)))
+        output = self.w_2(output).transpose(2, 1)
+        output = self.dropout(output)
+        return output
