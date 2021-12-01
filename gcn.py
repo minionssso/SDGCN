@@ -9,6 +9,7 @@ from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 from torch.autograd import Variable
 from tree import Tree, head_to_tree, tree_to_adj
 from transformers import BertModel, BertConfig, BertPreTrainedModel, BertTokenizer
+from layers.attention import MultiHeadAttention
 
 
 class GCNClassifier(nn.Module):
@@ -74,7 +75,9 @@ class GCNAbsaModel(nn.Module):
         # mask gcn
         self.mask_syn_gcn = GCN(args, args.rnn_hidden * 2, args.hidden_dim)
         # PointwiseFeedForward
-        self.mean_pool = PointwiseFeedForward(self.args.hidden_dim*2, self.args.hidden_dim)
+        self.syn_mean_pool = PointwiseFeedForward(self.args.hidden_dim*2, self.args.hidden_dim)
+        self.sem_mean_pool = PointwiseFeedForward(self.args.hidden_dim*2, self.args.hidden_dim)
+
         # GCN层, syn GCN + sem GCN
         self.gcn_syn.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim))
         self.gcn_sem.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim))
@@ -85,6 +88,9 @@ class GCNAbsaModel(nn.Module):
                 torch.FloatTensor(args.hidden_dim, args.hidden_dim).normal_(0, 1)))  # 正态分布
             self.w_sem.append(nn.Parameter(
                 torch.FloatTensor(args.hidden_dim, args.hidden_dim).normal_(0, 1)))
+        # 语义 MHSA + PCT
+        self.mhsa_global = MultiHeadAttention(embed_dim=args.rnn_hidden * 2, n_head=args.head_num)
+        self.ffn_global = PointwiseFeedForward(args.rnn_hidden * 2, args.hidden_dim, dropout=args.input_dropout)
         # Hierarchical aspect—based attention
         self.syn_attn = TimeWiseAspectBasedAttn(args.hidden_dim, args.num_layers)
         self.sem_attn = TimeWiseAspectBasedAttn(args.hidden_dim, args.num_layers)
@@ -171,19 +177,24 @@ class GCNAbsaModel(nn.Module):
         return outputs
 
     # mask dep_dist
-    def feature_dynamic_mask(self, text, asp, distances_input=None):
+    def feature_dynamic_mask(self, text, asp, asp_mask=None, distances_input=None):
         texts = text.cpu()  # batch_size x seq_len
         asps = asp.cpu()  # batch_size x aspect_len
         if distances_input is not None:
             distances_input = distances_input.cpu().numpy()
-        mask_len = self.args.SRD
+            mask_len = self.args.syn_srd
+        if asp_mask is not None:
+            asp_mask = asp_mask.cpu()
+            mask_len = self.args.sem_srd
         masked_text_vec = np.ones((text.size(0), text.size(1), self.args.rnn_hidden),
                                           dtype=np.float32)  # batch_size x seq_len x rnn hidden size*2
         for text_i, asp_i in zip(range(len(texts)), range(len(asps))):  # For each sample
             if distances_input is None:
-                asp_len = np.count_nonzero(asps[asp_i])  # Calculate aspect length
+                # asp_len = np.count_nonzero(asps[asp_i])  # Calculate aspect length
+                asp_len = torch.count_nonzero(asps[asp_i])
                 try:
-                    asp_begin = np.argwhere(texts[text_i] == asps[asp_i][0])[0][0]
+                    # asp_begin = np.argwhere(texts[text_i] == asps[asp_i][0])[0][0]
+                    asp_begin = torch.nonzero(asp_mask[asp_i])[0]
                 except:
                     continue
                 # Mask begin -> Relative position of an aspect vs the mask
@@ -193,7 +204,7 @@ class GCNAbsaModel(nn.Module):
                     mask_begin = 0
                 for i in range(mask_begin):  # Masking to the left
                     masked_text_vec[text_i][i] = np.zeros(self.args.rnn_hidden, dtype=np.float)
-                for j in range(asp_begin + asp_len + mask_len, self.opt.max_seq_len): # Masking to the right
+                for j in range(asp_begin + asp_len + mask_len, text.size(1)):  # Masking to the right
                     masked_text_vec[text_i][j] = np.zeros(self.args.rnn_hidden, dtype=np.float)
             else:
                 distances_i = distances_input[text_i][:len(texts[1])]  # 按行取
@@ -207,13 +218,13 @@ class GCNAbsaModel(nn.Module):
     # ############## Model ################
     def forward(self, inputs):
         if self.args.emb_type == "bert":
-            tok, asp, pos, head, dep, post, asp_mask, length, adj, word_idx, segment_ids = inputs
+            tok, asp, pos, head, dep, post, asp_mask, length, adj, word_idx, segment_ids, dist = inputs
             embs = self.create_bert_embs(tok, pos, post, word_idx, segment_ids)
             hidden = self.Dense(embs, length)
         else:
             tok, asp, pos, head, dep, post, asp_mask, length, adj, dist = inputs       # unpack inputs
             # 三重embedding
-            embs = self.create_embs(tok, pos, post)  # 拼接三种词嵌入：Glove+POS(词性标注)+位置嵌入 (bs,seq_len,emb_dim+pos_dim+post_dim)
+            embs = self.create_embs(tok, pos, post)  # 三种词嵌入：Glove+POS(词性标注)+位置嵌入 (bs,seq_len,emb_dim+pos_dim+post_dim)
             # Bi-LSTM encoding
             hidden = self.encode_with_rnn(embs, length, embs.size(0))  # [batch_size, seq_len, rnn_hidden*2]
             # bi-lism 句子级特征提取
@@ -223,19 +234,30 @@ class GCNAbsaModel(nn.Module):
         cos_adj = self.cos_attn_adj(hidden, score_mask)  # [batch_size, head_num, seq_len, seq_len]
         cos_adj = torch.sum(cos_adj, dim=1) / self.args.head_num  # 4头求平均，公式（6）
 
-        h_syn = []  # 保存三层GCN的输出
+        h_syn = []  # 保存三层GCN的输出(保存MHSA
         h_sem = []
         h_syn_mask = []  # 保存mask的输出
 
         # GCN encoding
         h_syn.append(self.gcn_syn[0](adj, hidden, score_mask, first_layer=True))  # 句法图和BiLSTM输出，一起输入三层SynGCN
-        h_sem.append(self.gcn_sem[0](cos_adj, hidden, score_mask, first_layer=True))  # 语法图和BiLSTM输出，一起输入三层SemGCN
-        # mask gcn encoding
-        if self.args.local_dist_focus == 'cdm':
-            masked_text_vec = self.feature_dynamic_mask(hidden, asp, dist)
-            local_h_syn = torch.mul(h_syn[0], masked_text_vec)
+        # semGCN origin
+        # h_sem.append(self.gcn_sem[0](cos_adj, hidden, score_mask, first_layer=True))  # 语法图和BiLSTM输出，一起输入三层SemGCN
+        # 改成MHSA+PCT ############
+        h_sem_demo, _ = self.mhsa_global(hidden, hidden)
+        h_sem.append(self.ffn_global(h_sem_demo))
+        # mask sem local + global
+        if self.args.local_text_focus == 'sem_cdm':
+            masked_sem_vec = self.feature_dynamic_mask(hidden, asp, asp_mask)
+            local_h_sem = torch.mul(h_sem[0], masked_sem_vec)
+        h_sem_global_local = torch.cat((h_sem[0], local_h_sem), dim=-1)
+        h_sem[0] = self.syn_mean_pool(h_sem_global_local)
+        # mask syn local + global
+        if self.args.local_dist_focus == 'syn_cdm':
+            masked_syn_vec = self.feature_dynamic_mask(hidden, asp, dist)
+            local_h_syn = torch.mul(h_syn[0], masked_syn_vec)
         h_syn_global_local = torch.cat((h_syn[0], local_h_syn), dim=-1)  # 方案2
-        h_syn[0] = self.mean_pool(h_syn_global_local)
+        h_syn[0] = self.syn_mean_pool(h_syn_global_local)
+        # origin ############################ 还有两层
         for i in range(self.args.num_layers - 1):
             # graph communication layer
             h_syn_ = self.graph_comm(h_syn[i], self.w_syn[i], h_sem[i], score_mask)
@@ -427,34 +449,38 @@ class Attention(nn.Module):
         return w * z, w
 
 
-class MultiHeadAttention(nn.Module):
-    # d_model:hidden_dim，h:head_num
-    def __init__(self, args, head_num, hidden_dim, dropout=0.1):
-        super(MultiHeadAttention, self).__init__()
-        assert hidden_dim % head_num == 0
-
-        self.d_k = int(hidden_dim // head_num)
-        self.head_num = head_num
-        self.linears = nn.ModuleList([copy.deepcopy(nn.Linear(hidden_dim, hidden_dim)) for _ in range(2)])
-        self.dropout = nn.Dropout(p=dropout)
-
-    def attention(self, query, key, score_mask, dropout=None):
-        d_k = query.size(-1)
-        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
-        if score_mask is not None:
-            scores = scores.masked_fill(score_mask, -1e9)
-        b = ~score_mask[:, :, 0:1]
-        p_attn = F.softmax(scores, dim=-1) * b.float()
-        if dropout is not None:
-            p_attn = dropout(p_attn)
-        return p_attn
-
-    def forward(self, query, key, score_mask):
-        nbatches = query.size(0)
-        query, key = [l(x).view(nbatches, -1, self.head_num, self.d_k).transpose(1, 2)
-                             for l, x in zip(self.linears, (query, key))]
-        attn = self.attention(query, key, score_mask, dropout=self.dropout)
-        return attn
+# class MultiHeadAttention(nn.Module):
+#     # d_model:hidden_dim，h:head_num
+#     def __init__(self, args, head_num, hidden_dim, dropout=0.1):
+#         super(MultiHeadAttention, self).__init__()
+#         assert hidden_dim % head_num == 0
+#
+#         self.d_k = int(hidden_dim // head_num)
+#         self.head_num = head_num
+#         self.linears = nn.ModuleList([copy.deepcopy(nn.Linear(hidden_dim, hidden_dim)) for _ in range(2)])
+#         self.dropout = nn.Dropout(p=dropout)
+#
+#     def attention(self, query, key, score_mask, dropout=None):
+#         d_k = query.size(-1)
+#         scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
+#         if score_mask is not None:
+#             scores = scores.masked_fill(score_mask.unsqueeze(1), -1e9)  # 在mask为True时，用-1e9填充张量元素。
+#         b = ~(score_mask.unsqueeze(1)[:, :, :, 0:1])
+#         p_attn = F.softmax(scores, dim=-1) * b.float()
+#         if dropout is not None:
+#             p_attn = dropout(p_attn)
+#         return p_attn
+#
+#     def forward(self, query, key, score_mask):
+#         nbatches = query.size(0)
+#         query, key = [l(x).view(nbatches, -1, self.head_num, self.d_k).transpose(1, 2)
+#                              for l, x in zip(self.linears, (query, key))]
+#         attn = self.attention(query, key, score_mask, dropout=self.dropout)
+#         output = torch.bmm(attn, query)
+#         output = torch.cat(torch.split(output, nbatches, dim=0), dim=-1)
+#         output = self.linears(output)
+#         output = self.dropout(output)
+#         return output, attn
 
 
 class PointwiseFeedForward(nn.Module):

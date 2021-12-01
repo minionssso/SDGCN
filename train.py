@@ -28,7 +28,7 @@ parser.add_argument('--direct', type=bool,  default=False, help='Digraph')
 parser.add_argument('--loop', type=bool, default=True, help='Self loop')
 parser.add_argument('--l2reg', type=float, default=1e-5, help='l2 .')
 parser.add_argument('--num_epoch', type=int, default=200, help='Number of total training epochs.')
-parser.add_argument('--batch_size', type=int, default=32, help='Training batch size.')
+parser.add_argument('--batch_size', type=int, default=16, help='Training batch size.')
 parser.add_argument('--log_step', type=int, default=40, help='Print log every k steps.')
 parser.add_argument('--log', type=str, default='logs.txt', help='Write training log to file.')
 parser.add_argument('--save_dir', type=str, default='./saved_models', help='Root dir for saving models.')
@@ -46,13 +46,15 @@ parser.add_argument('--num_layers', type=int, default=3, help='Num of GCN layers
 parser.add_argument('--head_num', type=int, default=3, help='head_num must be divisible by hidden_dim')
 
 # bert
-parser.add_argument('--emb_type', type=str, default='bert', help='[glove, bert]')
+parser.add_argument('--emb_type', type=str, default='glove', help='[glove, bert]')
 parser.add_argument('--bert_lr', type=float, default=5e-5, help='5e-5, 3e-5, 2e-5')
 parser.add_argument('--bert_model_dir', type=str, default='./bert_model', help='Root dir for loading pretrained bert')
 parser.add_argument('--DEVICE', type=int, default=0, help='The number of GPU')
 # dist_mask
-parser.add_argument('--SRD', type=int, default=3, help='set SRD')
-parser.add_argument('--local_dist_focus', type=str, default='cdm', help='cdm or cdw')
+parser.add_argument('--sem_srd', type=int, default=3, help='set sem SRD')
+parser.add_argument('--syn_srd', type=int, default=3, help='set syn SRD')
+parser.add_argument('--local_dist_focus', type=str, default='syn_cdm', help='syn_cdm or cdw')
+parser.add_argument('--local_text_focus', type=str, default='sem_cdm', help='cdm or cdw')
 args = parser.parse_args()
 
 # set device

@@ -50,7 +50,7 @@ class GCNTrainer(object):
             print("model saved to {}".format(filename))
         except BaseException:
             print("[Warning: Saving failed... continuing anyway.]")
-
+    # train
     def update(self, batch):
         if self.args.emb_type == "glove":
             inputs = batch[0:10]  # 去除polarity tensor的输入
@@ -62,11 +62,13 @@ class GCNTrainer(object):
         self.model.train()
         self.optimizer.zero_grad()
         logits, gcn_outputs, h0, h1 = self.model(inputs)
-        # loss = F.cross_entropy(logits, label, reduction='mean')
-        class_weights = self.calculate_weights(label)
-        class_weights = torch.FloatTensor(class_weights).to(self.args.device)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-        loss = criterion(logits, label)
+        loss = F.cross_entropy(logits, label, reduction='mean')
+        # ##################################
+        # class_weights = self.calculate_weights(label)
+        # class_weights = torch.FloatTensor(class_weights).to(self.args.device)
+        # criterion = nn.CrossEntropyLoss(weight=class_weights)
+        # loss = criterion(logits, label)
+        # #####################################
         corrects = (torch.max(logits, 1)[1].view(label.size()).data == label.data).sum()
         acc = 100.0 * np.float(corrects) / label.size()[0]
 
@@ -74,23 +76,25 @@ class GCNTrainer(object):
         loss.backward()
         self.optimizer.step()
         return loss.data, acc
-
+    # eval
     def predict(self, batch):
         if self.args.emb_type == "glove":
-            inputs = batch[0:9]
+            inputs = batch[0:10]
         elif self.args.emb_type == "bert":
-            inputs = batch[0:11]
+            inputs = batch[0:12]
         label = batch[-1]
 
         # forward
         self.model.eval()
         logits, gcn_outputs, h0, h1 = self.model(inputs)
 
-        # loss = F.cross_entropy(logits, label, reduction='mean')
-        class_weights = self.calculate_weights(label)
-        class_weights = torch.FloatTensor(class_weights).to(self.args.device)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-        loss = criterion(logits, label)
+        loss = F.cross_entropy(logits, label, reduction='mean')
+        # #####################################
+        # class_weights = self.calculate_weights(label)
+        # class_weights = torch.FloatTensor(class_weights).to(self.args.device)
+        # criterion = nn.CrossEntropyLoss(weight=class_weights)
+        # loss = criterion(logits, label)
+        # #####################################
         corrects = (torch.max(logits, 1)[1].view(label.size()).data == label.data).sum()
         acc = 100.0 * np.float(corrects) / label.size()[0]
         predictions = np.argmax(logits.data.cpu().numpy(), axis=1).tolist()
