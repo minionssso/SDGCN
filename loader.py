@@ -141,7 +141,7 @@ class DataLoader(object):
         assert len(aspect_indexer) == len(aspect)
 
         # 句子后面拼上aspect, segment_idx是bert中用于表示句子idx的标志
-        input_cat_ids = input_ids + input_aspect_ids[1:]
+        input_cat_ids = input_ids + input_aspect_ids[1:]  # [cls] sen [sep] asp [sep]
         segment_ids = [0] * len(input_ids) + [1] * len(input_aspect_ids[1:])
 
         # tok, asp, seg, word_idx, asp_idx

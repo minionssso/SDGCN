@@ -9,7 +9,7 @@ from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 from torch.autograd import Variable
 from tree import Tree, head_to_tree, tree_to_adj
 from transformers import BertModel, BertConfig, BertPreTrainedModel, BertTokenizer
-from layers.attention import MultiHeadAttention
+# from layers.attention import MultiHeadAttention
 
 
 class GCNClassifier(nn.Module):
@@ -57,6 +57,7 @@ class GCNAbsaModel(nn.Module):
         self.in_dim = args.emb_dim + args.post_dim + args.pos_dim
         if self.args.emb_type == 'bert':
             self.dense = nn.Linear(self.in_dim, args.rnn_hidden * 2)
+            self.bert_dropout = nn.Dropout(args.input_dropout)
         else:
             self.rnn = nn.LSTM(self.in_dim, args.rnn_hidden, 1, batch_first=True, bidirectional=True)
 
@@ -68,6 +69,8 @@ class GCNAbsaModel(nn.Module):
         # gcn layer
         self.gcn_syn = nn.ModuleList()
         self.gcn_sem = nn.ModuleList()
+        self.mhsa_sem = nn.ModuleList()
+        # self.ffn_sem = nn.ModuleList()
         # gate weight
         self.w_syn = nn.ParameterList()
         self.w_sem = nn.ParameterList()
@@ -75,22 +78,34 @@ class GCNAbsaModel(nn.Module):
         # mask gcn
         self.mask_syn_gcn = GCN(args, args.rnn_hidden * 2, args.hidden_dim)
         # PointwiseFeedForward
-        self.syn_mean_pool = PointwiseFeedForward(self.args.hidden_dim*2, self.args.hidden_dim)
-        self.sem_mean_pool = PointwiseFeedForward(self.args.hidden_dim*2, self.args.hidden_dim)
+        # self.syn_mean_pool = PointwiseFeedForward(self.args.hidden_dim*2, self.args.hidden_dim)
+        # self.sem_mean_pool = PointwiseFeedForward(self.args.hidden_dim*2, self.args.hidden_dim)
+        self.linear_double_syn = nn.Linear(args.rnn_hidden*4, args.rnn_hidden*2)
+        self.linear_double_sem = nn.Linear(args.rnn_hidden*4, args.rnn_hidden*2)
 
         # GCN层, syn GCN + sem GCN
-        self.gcn_syn.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim))
-        self.gcn_sem.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim))
+        # TODO 消融 MHGCN--> GCN
+        # self.gcn_syn.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim*2))
+        # ########## MHGCN
+        self.gcn_syn.append(MultiHeadGCN(args, args.head_num, args.rnn_hidden*2, args.hidden_dim*2))
+        # self.gcn_sem.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim))
+        # 语义 MHSA + PCT
+        self.mhsa_sem.append(MultiHeadAttention(args, args.head_num, args.rnn_hidden*2))
+        # self.ffn_global = PointwiseFeedForward(args.rnn_hidden * 2, args.hidden_dim, dropout=args.input_dropout)
+        # self.ffn_sem.append(nn.Linear(args.rnn_hidden*2, args.hidden_dim))
         for i in range(1, self.args.num_layers):
-            self.gcn_syn.append(GCN(args, args.hidden_dim, args.hidden_dim))
-            self.gcn_sem.append(GCN(args, args.hidden_dim, args.hidden_dim))
+            # ########## MHGCN
+            self.gcn_syn.append(MultiHeadGCN(args, args.head_num, args.hidden_dim*2, args.hidden_dim*2))
+            # TODO 消融 MHGCN --> GCN
+            # self.gcn_syn.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim*2))
+            # self.gcn_sem.append(GCN(args, args.hidden_dim, args.hidden_dim))
+            self.mhsa_sem.append(MultiHeadAttention(args, args.head_num, args.rnn_hidden*2))
+            # self.ffn_sem.append(nn.Linear(args.rnn_hidden, args.hidden_dim))
             self.w_syn.append(nn.Parameter(
                 torch.FloatTensor(args.hidden_dim, args.hidden_dim).normal_(0, 1)))  # 正态分布
             self.w_sem.append(nn.Parameter(
                 torch.FloatTensor(args.hidden_dim, args.hidden_dim).normal_(0, 1)))
-        # 语义 MHSA + PCT
-        self.mhsa_global = MultiHeadAttention(embed_dim=args.rnn_hidden * 2, n_head=args.head_num)
-        self.ffn_global = PointwiseFeedForward(args.rnn_hidden * 2, args.hidden_dim, dropout=args.input_dropout)
+
         # Hierarchical aspect—based attention
         self.syn_attn = TimeWiseAspectBasedAttn(args.hidden_dim, args.num_layers)
         self.sem_attn = TimeWiseAspectBasedAttn(args.hidden_dim, args.num_layers)
@@ -102,8 +117,11 @@ class GCNAbsaModel(nn.Module):
         self.alpha = nn.Parameter(torch.tensor(0.5))
 
         # fully connect Layer
-        self.linear = nn.Linear(2 * args.hidden_dim, args.hidden_dim)
+        self.linear = nn.Linear(4 * args.hidden_dim, args.hidden_dim)  # (408,204) MHSA
+        # self.linear = nn.Linear(args.hidden_dim, args.hidden_dim)  # MHGCN
+        self.final_drop = nn.Dropout(args.input_dropout)
 
+        self.hid_linear = nn.Linear(args.hidden_dim * 2, args.hidden_dim)  # 408-->204,再resnet
     # 拼接三种词嵌入
     def create_embs(self, tok, pos, post):
         # embedding
@@ -140,20 +158,7 @@ class GCNAbsaModel(nn.Module):
         return rnn_outputs
 
     def create_adj_mask(self, rnn_hidden):
-        score_mask = torch.matmul(rnn_hidden, rnn_hidden.transpose(-2, -1))  # 句子自己和自己相乘，也就是句子里每个词都和别的词乘一遍，做相似度计算呢？
-        # from torchvision import transforms
-        # unloader = transforms.ToPILImage()
-        # for i, s in enumerate(score_mask):
-        #     image = s.cpu().clone()  # clone the tensor
-        #     # image = image.squeeze(0)  # remove the fake batch dimension
-        #     image = unloader(image)
-        #     image.save('score_mask_{}.jpg'.format(i))
-        # for hid, s in zip(rnn_hidden, score_mask):
-            # h_len = (hid != 0).size(0)
-            # s_len = (s != 0).size(0)
-            # h_len = torch.sum(hid != 0, dim=0)[0]
-            # s_len = torch.sum(s != 0, dim=0)[0]
-            # assert h_len == s_len
+        score_mask = torch.matmul(rnn_hidden, rnn_hidden.transpose(-2, -1))  # 句子自己和自己相乘，没有词的地方为空
         score_mask = (score_mask == 0)  # =0的值为True
         return score_mask
 
@@ -186,7 +191,7 @@ class GCNAbsaModel(nn.Module):
         if asp_mask is not None:
             asp_mask = asp_mask.cpu()
             mask_len = self.args.sem_srd
-        masked_text_vec = np.ones((text.size(0), text.size(1), self.args.rnn_hidden),
+        masked_text_vec = np.ones((text.size(0), text.size(1), self.args.rnn_hidden*2),
                                           dtype=np.float32)  # batch_size x seq_len x rnn hidden size*2
         for text_i, asp_i in zip(range(len(texts)), range(len(asps))):  # For each sample
             if distances_input is None:
@@ -203,24 +208,25 @@ class GCNAbsaModel(nn.Module):
                 else:
                     mask_begin = 0
                 for i in range(mask_begin):  # Masking to the left
-                    masked_text_vec[text_i][i] = np.zeros(self.args.rnn_hidden, dtype=np.float)
+                    masked_text_vec[text_i][i] = np.zeros(self.args.rnn_hidden*2, dtype=np.float)
                 for j in range(asp_begin + asp_len + mask_len, text.size(1)):  # Masking to the right
-                    masked_text_vec[text_i][j] = np.zeros(self.args.rnn_hidden, dtype=np.float)
+                    masked_text_vec[text_i][j] = np.zeros(self.args.rnn_hidden*2, dtype=np.float)
             else:
                 distances_i = distances_input[text_i][:len(texts[1])]  # 按行取
                 for i, dist in enumerate(distances_i):
                     if dist > mask_len:
-                        masked_text_vec[text_i][i] = np.zeros(self.args.rnn_hidden, dtype=np.float)
+                        masked_text_vec[text_i][i] = np.zeros(self.args.rnn_hidden*2, dtype=np.float)
 
         masked_text_vec = torch.from_numpy(masked_text_vec)
         return masked_text_vec.to(self.args.device)
 
-    # ############## Model ################
+    # ############## Model Start ################
     def forward(self, inputs):
         if self.args.emb_type == "bert":
             tok, asp, pos, head, dep, post, asp_mask, length, adj, word_idx, segment_ids, dist = inputs
-            embs = self.create_bert_embs(tok, pos, post, word_idx, segment_ids)
-            hidden = self.Dense(embs, length)
+            embs = self.create_bert_embs(tok, pos, post, word_idx, segment_ids) # torch.Size([32, 41, 828])
+            hidden = self.Dense(embs, length)  # torch.Size([32, 41, 408])
+            # hidden = self.bert_dropout(hidden)
         else:
             tok, asp, pos, head, dep, post, asp_mask, length, adj, dist = inputs       # unpack inputs
             # 三重embedding
@@ -228,59 +234,89 @@ class GCNAbsaModel(nn.Module):
             # Bi-LSTM encoding
             hidden = self.encode_with_rnn(embs, length, embs.size(0))  # [batch_size, seq_len, rnn_hidden*2]
             # bi-lism 句子级特征提取
-        score_mask = self.create_adj_mask(hidden)  # score_mask=0的值为True，等于0表示词之间完全不相关嘛，句子之间做相似度计算呢？
+        score_mask = self.create_adj_mask(hidden)  # score_mask=0的值为True，等于0表示词之间完全不相关嘛，句子之间做相似度计算呢？ torch.Size([32, 41, 41])
 
         # cosine adj matrix、KHeadAttnCosSimilarity 捕获语义相似度
-        cos_adj = self.cos_attn_adj(hidden, score_mask)  # [batch_size, head_num, seq_len, seq_len]
-        cos_adj = torch.sum(cos_adj, dim=1) / self.args.head_num  # 4头求平均，公式（6）
+        # cos_adj = self.cos_attn_adj(hidden, score_mask)  # [batch_size, head_num, seq_len, seq_len] 32,3,41,41
+        # cos_adj = torch.sum(cos_adj, dim=1) / self.args.head_num  # 4头求平均，公式（6）
 
         h_syn = []  # 保存三层GCN的输出(保存MHSA
         h_sem = []
-        h_syn_mask = []  # 保存mask的输出
+        h_syn_res = []
+        h_sem_res = []
 
-        # GCN encoding
-        h_syn.append(self.gcn_syn[0](adj, hidden, score_mask, first_layer=True))  # 句法图和BiLSTM输出，一起输入三层SynGCN
+        #
+        # GCN encoding ###### MultiHeadGCN
+        h_syn.append(self.gcn_syn[0](adj, hidden, score_mask))  # 句法图和BiLSTM输出，一起输入三层SynGCN , first_layer=True
+        # h_syn[0] = torch.div(torch.sum(h_syn[0], dim=1), length.view(length.size(0), 1))
         # semGCN origin
         # h_sem.append(self.gcn_sem[0](cos_adj, hidden, score_mask, first_layer=True))  # 语法图和BiLSTM输出，一起输入三层SemGCN
         # 改成MHSA+PCT ############
-        h_sem_demo, _ = self.mhsa_global(hidden, hidden)
-        h_sem.append(self.ffn_global(h_sem_demo))
-        # mask sem local + global
-        if self.args.local_text_focus == 'sem_cdm':
-            masked_sem_vec = self.feature_dynamic_mask(hidden, asp, asp_mask)
-            local_h_sem = torch.mul(h_sem[0], masked_sem_vec)
-        h_sem_global_local = torch.cat((h_sem[0], local_h_sem), dim=-1)
-        h_sem[0] = self.syn_mean_pool(h_sem_global_local)
-        # mask syn local + global
-        if self.args.local_dist_focus == 'syn_cdm':
-            masked_syn_vec = self.feature_dynamic_mask(hidden, asp, dist)
-            local_h_syn = torch.mul(h_syn[0], masked_syn_vec)
-        h_syn_global_local = torch.cat((h_syn[0], local_h_syn), dim=-1)  # 方案2
-        h_syn[0] = self.syn_mean_pool(h_syn_global_local)
+        h_sem.append(self.mhsa_sem[0](hidden, hidden, score_mask))
+        # h_sem.append(self.ffn_sem[0](h_sem_demo))
+        # h_sem[0] = torch.div(torch.sum(h_sem[0], dim=1), length.view(length.size(0), 1))
+        # resnet
+        if self.args.shortcut:
+            h_syn_res.append(hidden + h_syn[0])
+            h_sem_res.append(hidden + h_sem[0])  # 32,41,408
+        else:
+            h_syn_res.append(h_syn[0])
+            h_sem_res.append(h_sem[0])
+        # mask h_sem_res = local + global
+        if self.args.local_sem_focus == 'sem_cdm':
+            masked_sem_vec = self.feature_dynamic_mask(h_sem_res[0], asp, asp_mask)
+            local_h_sem = torch.mul(h_sem_res[0], masked_sem_vec)
+            h_sem_res[0] = torch.cat((h_sem_res[0], local_h_sem), dim=-1)
+            # h_sem_res[0] = self.sem_mean_pool(h_sem_res[0])
+            h_sem_res[0] = self.linear_double_sem(h_sem_res[0])
+        # mask h_syn_res = local + global
+        if self.args.local_syn_focus == 'syn_cdm':
+            masked_syn_vec = self.feature_dynamic_mask(h_syn_res[0], asp, distances_input=dist)
+            local_h_syn = torch.mul(h_syn_res[0], masked_syn_vec)
+            h_syn_res[0] = torch.cat((h_syn_res[0], local_h_syn), dim=-1)  # 方案2
+            # h_syn[0] = self.syn_mean_pool(h_syn_global_local)
+            h_syn_res[0] = self.linear_double_syn(h_syn_res[0])
         # origin ############################ 还有两层
         for i in range(self.args.num_layers - 1):
+            # ######## MHSA、MultiGCN
+            h_syn.append(self.gcn_syn[i+1](adj, h_syn_res[i], score_mask))  # h_syn[1]
+            h_sem.append(self.mhsa_sem[i+1](h_sem_res[i], h_sem_res[i], score_mask))
+            if self.args.shortcut:
+                h_syn_res.append(hidden + h_syn_res[i] + h_syn[i+1])
+                h_sem_res.append(hidden + h_sem_res[i] + h_sem[i + 1])
+            else:
+                h_syn_res.append(h_syn[i+1])
+                h_sem_res.append(h_sem[i + 1])
             # graph communication layer
-            h_syn_ = self.graph_comm(h_syn[i], self.w_syn[i], h_sem[i], score_mask)
-            h_sem_ = self.graph_comm(h_sem[i], self.w_sem[i], h_syn[i], score_mask)
+            # h_syn_ = self.graph_comm(h_syn[i], self.w_syn[i], h_sem[i], score_mask)
+            # h_sem_ = self.graph_comm(h_sem[i], self.w_sem[i], h_syn[i], score_mask)
+            # h_syn.append(self.gcn_syn[i + 1](adj, h_syn_, score_mask, first_layer=False))
+            # h_sem.append(self.mhsa_sem[i + 1](h_sem_, h_sem_, score_mask, first_layer=False))
+            # # h_sem.append(self.gcn_sem[i + 1](cos_adj, h_sem_, score_mask, first_layer=False))
+        h_syn_res[1] = torch.div(torch.sum(h_syn_res[1], dim=1), length.view(length.size(0), 1))
+        h_sem_res[1] = torch.div(torch.sum(h_sem_res[1], dim=1), length.view(length.size(0), 1))
+        # 32,204
 
-            h_syn.append(self.gcn_syn[i + 1](adj, h_syn_, score_mask, first_layer=False))
-            h_sem.append(self.gcn_sem[i + 1](cos_adj, h_sem_, score_mask, first_layer=False))
-
-        h_syn = torch.stack(h_syn, dim=0)
-        h_sem = torch.stack(h_sem, dim=0)
+        # h_syn = torch.stack(h_syn, dim=0)
+        # h_sem = torch.stack(h_sem, dim=0)  # torch.Size([2, 32, 41, 204])
 
         # time-wise aspect-based attention 基于时间方面的注意
-        h_syn_final = self.syn_attn(h_syn[:-1], h_syn[-1], asp_mask, score_mask)
-        h_sem_final = self.sem_attn(h_sem[:-1], h_sem[-1], asp_mask, score_mask)
+        # h_syn_final = self.syn_attn(h_syn[:-1], h_syn[-1], asp_mask, score_mask)
+        # h_sem_final = self.sem_attn(h_sem[:-1], h_sem[-1], asp_mask, score_mask)  # torch.Size([32, 408])
 
-        # h = torch.cat((h_syn_final, h_sem_final), dim=-1)
-        h = self.alpha * h_syn_final + (1 - self.alpha) * h_sem_final
-
+        # h = torch.cat((h_syn_final, h_sem_final), dim=-1)  # torch.Size([32, 816])
+        # h = self.alpha * h_syn_final + (1 - self.alpha) * h_sem_final  # torch.Size([32, 408])
+        # h = self.alpha * h_syn_ + (1 - self.alpha) * h_sem_
+        out = torch.cat((h_syn_res[1], h_sem_res[1]), dim=-1)
         # linear
-        outputs = torch.tanh(self.linear(h))  # F.tanh
+        # outputs = torch.tanh(self.linear(h))  # F.tanh
+        outputs = torch.tanh(self.linear(out))  # MultiHeadGCN
+        # outputs = torch.tanh(self.linear(h_sem[0]))  # MHSA
+        outputs = self.final_drop(outputs)
         # activa = nn.LeakyReLU(0.1)
         # outputs = activa(self.linear(h))
-        return outputs, h_syn_final, h_sem_final
+        # return outputs, h_syn_final, h_sem_final
+        return outputs, h_syn[0], h_syn[0]
 
 
 # 构造h0，c0的0矩阵
@@ -301,15 +337,6 @@ class GCN(nn.Module):
         self.W = nn.Linear(input_dim, output_dim, bias=False)  # 是否加bias
 
     def forward(self, adj, inputs, score_mask, first_layer=True):
-        # gcnlog  ASGCN公式（2）（3）
-        # 画出邻接矩阵
-        # from torchvision import transforms
-        # unloader = transforms.ToPILImage()
-        # for i, s in enumerate(adj):
-        #     image = s.cpu().clone()  # clone the tensor
-        #     # image = image.squeeze(0)  # remove the fake batch dimension
-        #     image = unloader(image)
-        #     image.save('./pictures/adj_{}.jpg'.format(i))
         denom = adj.sum(2).unsqueeze(2) + 1  # norm adj 度矩阵：表示连接节点数
         Ax = adj.bmm(inputs)
         AxW = self.W(Ax)
@@ -347,14 +374,6 @@ class KHeadAttnCosSimilarity(nn.Module):
         # 消除不是句子成分的影响，pad的影响
         # keep the value larger than threshold as the connection
         cos_adj = (cos_similarity > self.threshold).float()
-        # from torchvision import transforms
-        # unloader = transforms.ToPILImage()
-        # for i, s in enumerate(cos_adj):
-        #     for j, c in enumerate(s):
-        #         image = c.cpu().clone()  # clone the tensor
-        #         # image = image.squeeze(0)  # remove the fake batch dimension
-        #         image = unloader(image)
-        #         image.save('cos_adj_{}_{}.jpg'.format(i, j))
         return cos_adj  # 公式（7）的结果ai,j
 
     # attn = ((QW)(KW)^T)/sqrt(d)
@@ -449,38 +468,39 @@ class Attention(nn.Module):
         return w * z, w
 
 
-# class MultiHeadAttention(nn.Module):
-#     # d_model:hidden_dim，h:head_num
-#     def __init__(self, args, head_num, hidden_dim, dropout=0.1):
-#         super(MultiHeadAttention, self).__init__()
-#         assert hidden_dim % head_num == 0
-#
-#         self.d_k = int(hidden_dim // head_num)
-#         self.head_num = head_num
-#         self.linears = nn.ModuleList([copy.deepcopy(nn.Linear(hidden_dim, hidden_dim)) for _ in range(2)])
-#         self.dropout = nn.Dropout(p=dropout)
-#
-#     def attention(self, query, key, score_mask, dropout=None):
-#         d_k = query.size(-1)
-#         scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
-#         if score_mask is not None:
-#             scores = scores.masked_fill(score_mask.unsqueeze(1), -1e9)  # 在mask为True时，用-1e9填充张量元素。
-#         b = ~(score_mask.unsqueeze(1)[:, :, :, 0:1])
-#         p_attn = F.softmax(scores, dim=-1) * b.float()
-#         if dropout is not None:
-#             p_attn = dropout(p_attn)
-#         return p_attn
-#
-#     def forward(self, query, key, score_mask):
-#         nbatches = query.size(0)
-#         query, key = [l(x).view(nbatches, -1, self.head_num, self.d_k).transpose(1, 2)
-#                              for l, x in zip(self.linears, (query, key))]
-#         attn = self.attention(query, key, score_mask, dropout=self.dropout)
-#         output = torch.bmm(attn, query)
-#         output = torch.cat(torch.split(output, nbatches, dim=0), dim=-1)
-#         output = self.linears(output)
-#         output = self.dropout(output)
-#         return output, attn
+class MultiHeadAttention(nn.Module):
+    # d_model:hidden_dim，h:head_num
+    def __init__(self, args, head_num, hidden_dim):
+        super(MultiHeadAttention, self).__init__()
+        assert hidden_dim % head_num == 0
+
+        self.d_k = int(hidden_dim // head_num)
+        self.head_num = head_num
+        self.linears = nn.ModuleList([copy.deepcopy(nn.Linear(hidden_dim, hidden_dim)) for _ in range(2)])
+        self.dropout = nn.Dropout(args.mhsa_dropout)
+        self.proj = nn.Linear(hidden_dim, hidden_dim)
+
+    def attention(self, query, key, score_mask, dropout=None):
+        d_k = query.size(-1)
+        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
+        if score_mask is not None:
+            scores = scores.masked_fill(score_mask.unsqueeze(1), -1e9)  # 在mask为True时，用-1e9填充张量元素。
+        b = ~(score_mask.unsqueeze(1)[:, :, :, 0:1])
+        p_attn = F.softmax(scores, dim=-1) * b.float()
+        if dropout is not None:
+            p_attn = dropout(p_attn)
+        return p_attn
+
+    def forward(self, query, key, score_mask, first_layer=True):
+        nbatches = query.size(0)
+        query, key = [l(x).view(nbatches, -1, self.head_num, self.d_k).transpose(1, 2)
+                             for l, x in zip(self.linears, (query, key))]
+        attn = self.attention(query, key, score_mask, dropout=self.dropout)  # (32,3,41,41)
+        output = torch.matmul(attn, query)
+        output = torch.cat(torch.split(output, 1, dim=1), dim=-1).squeeze(1)
+        output = self.proj(output)
+        output = output if first_layer else self.dropout(output)
+        return output
 
 
 class PointwiseFeedForward(nn.Module):
@@ -501,3 +521,33 @@ class PointwiseFeedForward(nn.Module):
         output = self.w_2(output).transpose(2, 1)
         output = self.dropout(output)
         return output
+
+
+class MultiHeadGCN(nn.Module):
+    def __init__(self, args, head_num, input_dim, output_dim):
+        super(MultiHeadGCN, self).__init__()
+        self.args = args
+        self.d_k = int(input_dim // head_num)
+        self.h_k = int(output_dim // head_num)
+        self.head_num = head_num
+        self.mapped = nn.Linear(input_dim, output_dim)
+        # gcn layer
+        self.W = nn.Linear(self.h_k, self.h_k, bias=False)  # 是否加bias
+        self.drop = nn.Dropout(args.gcn_dropout)
+
+    def forward(self, adj, hidden, score_mask):
+        bs = hidden.size(0)
+        seq_len = hidden.size(1)
+        score_mask = score_mask.unsqueeze(1).repeat(1, self.head_num, 1, 1)
+        sem_hidden = self.mapped(hidden)
+        sem_hidden = sem_hidden.view(bs, seq_len, self.head_num, -1)
+        sem_hidden = sem_hidden.permute(2, 0, 1, 3)  # (4,32,41,102)
+        denom = adj.sum(2).unsqueeze(2) + 1  # (32,41,1)
+        Ax = adj.matmul(sem_hidden)  # (4,32,41,102)
+        AxW = self.W(Ax)
+        AxW = AxW / denom
+        out = self.drop(F.relu(AxW))
+        out = torch.cat(torch.split(out, 1, dim=0), dim=-1).squeeze(0)  # 多头求平均也行
+        return out
+
+

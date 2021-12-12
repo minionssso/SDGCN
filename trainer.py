@@ -25,6 +25,7 @@ class GCNTrainer(object):
 
         self.optimizer = torch.optim.Adam(
             self.parameters, lr=args.lr, weight_decay=args.l2reg, amsgrad=True)
+        # self.optimizer = torch.optim.Adadelta(self.parameters, lr=args.lr, weight_decay=args.l2reg)
 
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1, gamma=0.9)  # step_size=epoch
         # new_lr = old_lr * gamma
@@ -87,7 +88,6 @@ class GCNTrainer(object):
         # forward
         self.model.eval()
         logits, gcn_outputs, h0, h1 = self.model(inputs)
-
         loss = F.cross_entropy(logits, label, reduction='mean')
         # #####################################
         # class_weights = self.calculate_weights(label)
