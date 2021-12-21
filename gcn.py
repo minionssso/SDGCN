@@ -88,6 +88,7 @@ class GCNAbsaModel(nn.Module):
         # self.gcn_syn.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim*2))
         # ########## MHGCN
         self.gcn_syn.append(MultiHeadGCN(args, args.head_num, args.rnn_hidden*2, args.hidden_dim*2))
+
         # self.gcn_sem.append(GCN(args, args.rnn_hidden * 2, args.hidden_dim))
         # 语义 MHSA + PCT
         self.mhsa_sem.append(MultiHeadAttention(args, args.head_num, args.rnn_hidden*2))
@@ -116,9 +117,9 @@ class GCNAbsaModel(nn.Module):
         # learnable hyperparameter，最后的 α
         self.alpha = nn.Parameter(torch.tensor(0.5))
 
-        # fully connect Layer
-        self.linear = nn.Linear(4 * args.hidden_dim, args.hidden_dim)  # (408,204) MHSA
-        # self.linear = nn.Linear(args.hidden_dim, args.hidden_dim)  # MHGCN
+        # #### #fully connect Layer
+        # self.linear = nn.Linear(4 * args.hidden_dim, args.hidden_dim)  # (816,204) all
+        self.linear = nn.Linear(2*args.hidden_dim, args.hidden_dim)  #  (408,204)
         self.final_drop = nn.Dropout(args.input_dropout)
 
         self.hid_linear = nn.Linear(args.hidden_dim * 2, args.hidden_dim)  # 408-->204,再resnet
@@ -183,7 +184,7 @@ class GCNAbsaModel(nn.Module):
 
     # mask dep_dist
     def feature_dynamic_mask(self, text, asp, asp_mask=None, distances_input=None):
-        texts = text.cpu()  # batch_size x seq_len
+        texts = text.cpu()  # batch_size x seq_len x rnn*2
         asps = asp.cpu()  # batch_size x aspect_len
         if distances_input is not None:
             distances_input = distances_input.cpu().numpy()
@@ -196,7 +197,10 @@ class GCNAbsaModel(nn.Module):
         for text_i, asp_i in zip(range(len(texts)), range(len(asps))):  # For each sample
             if distances_input is None:
                 # asp_len = np.count_nonzero(asps[asp_i])  # Calculate aspect length
-                asp_len = torch.count_nonzero(asps[asp_i])
+                if self.args.emb_type == "bert":
+                    asp_len = torch.count_nonzero(asps[asp_i]) - 2
+                else:
+                    asp_len = torch.count_nonzero(asps[asp_i])
                 try:
                     # asp_begin = np.argwhere(texts[text_i] == asps[asp_i][0])[0][0]
                     asp_begin = torch.nonzero(asp_mask[asp_i])[0]
@@ -219,6 +223,49 @@ class GCNAbsaModel(nn.Module):
 
         masked_text_vec = torch.from_numpy(masked_text_vec)
         return masked_text_vec.to(self.args.device)
+
+    # weighted
+    def feature_dynamic_weighted(self, hid, asp, asp_mask=None, distances_input=None):
+        texts = hid.cpu()
+        asps = asp.cpu().numpy()
+        if distances_input is not None:
+            distances_input = distances_input.cpu().numpy()
+            mask_len = self.args.syn_srd
+        if asp_mask is not None:
+            asp_mask = asp_mask.cpu().numpy()
+            mask_len = self.args.sem_srd
+        masked_text_raw_indices = np.ones((hid.size(0), hid.size(1), self.args.rnn_hidden*2),
+                                          dtype=np.float32) # batch x seq x dim
+        for text_i, asp_i in zip(range(len(texts)), range(len(asps))):
+            if distances_input is None:  # 语义
+                asp_len = np.count_nonzero(asps[asp_i])
+                try:
+                    asp_begin = np.nonzero(asp_mask[asp_i])[0][0]
+                    asp_avg_index = (asp_begin * 2 + asp_len) / 2  # central position
+                except:
+                    continue
+                distances = np.zeros(np.count_nonzero(texts[text_i]), dtype=np.float32)  # , dtype=np.float32
+                for i in range(1, np.count_nonzero(texts[text_i])-1):  # 1-35 从1开始，0为CLS，mask_len=3，不mask算上自己的前两个，后两个
+                    srd = abs(i - asp_avg_index) + asp_len / 2
+                    if srd > mask_len:
+                        distances[i] = 1 - (srd - mask_len)/np.count_nonzero(texts[text_i])
+                    else:
+                        distances[i] = 1
+                for i in range(len(distances)):
+                    masked_text_raw_indices[text_i][i] = masked_text_raw_indices[text_i][i] * distances[i]
+            else:
+                distances_i = distances_input[text_i] # distances of batch i-th
+                for i, dist in enumerate(distances_i):
+                    if dist > mask_len:
+                        distances_i[i] = 1 - (dist - mask_len) / np.count_nonzero(texts[text_i])
+                    else:
+                        distances_i[i] = 1
+
+                for i in range(len(distances_i)):
+                    masked_text_raw_indices[text_i][i] = masked_text_raw_indices[text_i][i] * distances_i[i]
+
+        masked_text_raw_indices = torch.from_numpy(masked_text_raw_indices)
+        return masked_text_raw_indices.to(self.args.device)
 
     # ############## Model Start ################
     def forward(self, inputs):
@@ -248,13 +295,13 @@ class GCNAbsaModel(nn.Module):
         #
         # GCN encoding ###### MultiHeadGCN
         h_syn.append(self.gcn_syn[0](adj, hidden, score_mask))  # 句法图和BiLSTM输出，一起输入三层SynGCN , first_layer=True
-        # h_syn[0] = torch.div(torch.sum(h_syn[0], dim=1), length.view(length.size(0), 1))
+        # # h_syn[0] = torch.div(torch.sum(h_syn[0], dim=1), length.view(length.size(0), 1))
         # semGCN origin
-        # h_sem.append(self.gcn_sem[0](cos_adj, hidden, score_mask, first_layer=True))  # 语法图和BiLSTM输出，一起输入三层SemGCN
-        # 改成MHSA+PCT ############
+        # # h_sem.append(self.gcn_sem[0](cos_adj, hidden, score_mask, first_layer=True))  # 语法图和BiLSTM输出，一起输入三层SemGCN
+        # Sem MHSA ############
         h_sem.append(self.mhsa_sem[0](hidden, hidden, score_mask))
-        # h_sem.append(self.ffn_sem[0](h_sem_demo))
-        # h_sem[0] = torch.div(torch.sum(h_sem[0], dim=1), length.view(length.size(0), 1))
+        # # h_sem.append(self.ffn_sem[0](h_sem_demo))
+        # # h_sem[0] = torch.div(torch.sum(h_sem[0], dim=1), length.view(length.size(0), 1))
         # resnet
         if self.args.shortcut:
             h_syn_res.append(hidden + h_syn[0])
@@ -269,13 +316,29 @@ class GCNAbsaModel(nn.Module):
             h_sem_res[0] = torch.cat((h_sem_res[0], local_h_sem), dim=-1)
             # h_sem_res[0] = self.sem_mean_pool(h_sem_res[0])
             h_sem_res[0] = self.linear_double_sem(h_sem_res[0])
-        # mask h_syn_res = local + global
+
         if self.args.local_syn_focus == 'syn_cdm':
             masked_syn_vec = self.feature_dynamic_mask(h_syn_res[0], asp, distances_input=dist)
             local_h_syn = torch.mul(h_syn_res[0], masked_syn_vec)
             h_syn_res[0] = torch.cat((h_syn_res[0], local_h_syn), dim=-1)  # 方案2
             # h_syn[0] = self.syn_mean_pool(h_syn_global_local)
             h_syn_res[0] = self.linear_double_syn(h_syn_res[0])
+
+        # weight h_syn_res = local + global
+        if self.args.local_sem_focus == 'sem_cdw':
+            masked_sem_vec = self.feature_dynamic_weighted(tok, asp, asp_mask)
+            local_h_sem = torch.mul(h_sem_res[0], masked_sem_vec)
+            h_sem_res[0] = torch.cat((h_sem_res[0], local_h_sem), dim=-1)
+            # h_sem_res[0] = self.sem_mean_pool(h_sem_res[0])
+            h_sem_res[0] = self.linear_double_sem(h_sem_res[0])
+
+        # weight h_syn_res = local + global
+        if self.args.local_syn_focus == 'syn_cdw':
+            masked_syn_vec = self.feature_dynamic_weighted(h_syn_res[0], asp, asp_mask)
+            local_h_syn = torch.mul(h_syn_res[0], masked_syn_vec)
+            h_syn_res[0] = torch.cat((h_syn_res[0], local_h_syn), dim=-1)
+            h_syn_res[0] = self.linear_double_sem(h_syn_res[0])
+
         # origin ############################ 还有两层
         for i in range(self.args.num_layers - 1):
             # ######## MHSA、MultiGCN
@@ -283,22 +346,26 @@ class GCNAbsaModel(nn.Module):
             h_sem.append(self.mhsa_sem[i+1](h_sem_res[i], h_sem_res[i], score_mask))
             if self.args.shortcut:
                 h_syn_res.append(hidden + h_syn_res[i] + h_syn[i+1])
-                h_sem_res.append(hidden + h_sem_res[i] + h_sem[i + 1])
+                h_sem_res.append(hidden + h_sem_res[i] + h_sem[i+1])
             else:
                 h_syn_res.append(h_syn[i+1])
-                h_sem_res.append(h_sem[i + 1])
+                h_sem_res.append(h_sem[i+1])
             # graph communication layer
             # h_syn_ = self.graph_comm(h_syn[i], self.w_syn[i], h_sem[i], score_mask)
             # h_sem_ = self.graph_comm(h_sem[i], self.w_sem[i], h_syn[i], score_mask)
             # h_syn.append(self.gcn_syn[i + 1](adj, h_syn_, score_mask, first_layer=False))
             # h_sem.append(self.mhsa_sem[i + 1](h_sem_, h_sem_, score_mask, first_layer=False))
             # # h_sem.append(self.gcn_sem[i + 1](cos_adj, h_sem_, score_mask, first_layer=False))
-        h_syn_res[1] = torch.div(torch.sum(h_syn_res[1], dim=1), length.view(length.size(0), 1))
-        h_sem_res[1] = torch.div(torch.sum(h_sem_res[1], dim=1), length.view(length.size(0), 1))
-        # 32,204
+            # mean pooling ###############
+            # h_syn_final = h_syn_res[i+1]
+            # h_sem_final = h_sem_res[i+1]
+        # h_final = torch.cat((h_syn_final, h_sem_final), dim=-1)
+        h_syn_pool = torch.div(torch.sum(h_syn_res[-1], dim=1), length.view(length.size(0), 1))
+        h_sem_pool = torch.div(torch.sum(h_sem_res[-1], dim=1), length.view(length.size(0), 1))
+        # 32,408
 
-        # h_syn = torch.stack(h_syn, dim=0)
-        # h_sem = torch.stack(h_sem, dim=0)  # torch.Size([2, 32, 41, 204])
+        # # h_syn = torch.stack(h_syn, dim=0)
+        # # h_sem = torch.stack(h_sem, dim=0)  # torch.Size([2, 32, 41, 204])
 
         # time-wise aspect-based attention 基于时间方面的注意
         # h_syn_final = self.syn_attn(h_syn[:-1], h_syn[-1], asp_mask, score_mask)
@@ -307,16 +374,16 @@ class GCNAbsaModel(nn.Module):
         # h = torch.cat((h_syn_final, h_sem_final), dim=-1)  # torch.Size([32, 816])
         # h = self.alpha * h_syn_final + (1 - self.alpha) * h_sem_final  # torch.Size([32, 408])
         # h = self.alpha * h_syn_ + (1 - self.alpha) * h_sem_
-        out = torch.cat((h_syn_res[1], h_sem_res[1]), dim=-1)
+        # ############ 双通道拼接
+        # out = torch.cat((h_syn_pool, h_sem_pool), dim=-1)  # 32,816
+        out = self.alpha * h_syn_pool + (1 - self.alpha) * h_sem_pool  # 32,816
         # linear
-        # outputs = torch.tanh(self.linear(h))  # F.tanh
-        outputs = torch.tanh(self.linear(out))  # MultiHeadGCN
-        # outputs = torch.tanh(self.linear(h_sem[0]))  # MHSA
+        # outputs = torch.tanh(self.linear(h_syn_res[0]))  # MHGCN
+        # ############
+        outputs = torch.tanh(self.linear(out))  # all
         outputs = self.final_drop(outputs)
-        # activa = nn.LeakyReLU(0.1)
-        # outputs = activa(self.linear(h))
         # return outputs, h_syn_final, h_sem_final
-        return outputs, h_syn[0], h_syn[0]
+        return outputs, h_syn_res[-1], h_sem_res[-1]
 
 
 # 构造h0，c0的0矩阵

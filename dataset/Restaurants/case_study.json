@@ -1,0 +1,62 @@
+[
+    {
+        "token": [
+            "Great",
+            "food",
+            "but",
+            "the",
+            "service",
+            "was",
+            "dreadful",
+            "!"
+        ],
+        "pos": [
+            "JJ",
+            "NN",
+            "CC",
+            "DT",
+            "NN",
+            "VBD",
+            "JJ",
+            "."
+        ],
+        "head": [
+            2,
+            7,
+            2,
+            5,
+            2,
+            7,
+            0,
+            7
+        ],
+        "deprel": [
+            "amod",
+            "nsubj",
+            "cc",
+            "det",
+            "conj",
+            "cop",
+            "ROOT",
+            "punct"
+        ],
+        "aspects": [
+            {
+                "term": [
+                    "food"
+                ],
+                "from": 1,
+                "to": 2,
+                "polarity": "positive"
+            },
+            {
+                "term": [
+                    "service"
+                ],
+                "from": 4,
+                "to": 5,
+                "polarity": "negative"
+            }
+        ]
+    }
+]

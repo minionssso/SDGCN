@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import numpy as np
 from gcn import GCNClassifier
 import math
+import adabound
+from copy import deepcopy
 
 
 class GCNTrainer(object):
@@ -25,9 +27,9 @@ class GCNTrainer(object):
 
         self.optimizer = torch.optim.Adam(
             self.parameters, lr=args.lr, weight_decay=args.l2reg, amsgrad=True)
-        # self.optimizer = torch.optim.Adadelta(self.parameters, lr=args.lr, weight_decay=args.l2reg)
+        # self.optimizer = torch.optim.SGD(self.parameters, lr=args.lr, momentum=0.9, weight_decay=args.l2reg)
+        # self.optimizer = adabound.AdaBound(self.parameters, lr=args.lr, final_lr=args.final_lr)
 
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1, gamma=0.9)  # step_size=epoch
         # new_lr = old_lr * gamma
 
     # load model
@@ -154,3 +156,33 @@ class GCNTrainer(object):
         # loss_final = torch.from_numpy(loss_final)
         return loss_final.to(self.args.device)
 
+    def mask_exp(self, batch):
+        # batch = [b.cuda() for b in batch]
+
+        inputs = batch[0:12]  # glove 0:10
+        length = inputs[0].size(1)  # num of tokens
+        self.model.eval()
+        logits, h, h_syn, _ = self.model(inputs)  # conventional procedure   size of h:(1,50) logits:'positive': 0, 'negative': 1, 'neutral': 2
+        # for j in range(len(h)):  # 2 batch
+        hs = h[0].squeeze(0).cpu().detach().numpy()  # convert to numpy h为正常得分（所有词都没有mask）
+
+        h_w = list(range(length))
+        r = [0.00 for _ in range(length)]  # score
+
+        for i in range(length):  # 遍历每一词
+            inputs_w = deepcopy(inputs)  # 修改tuple值
+            inputs_w[0][0][i] = 0
+            _, h_w[i], _, _ = self.model(inputs_w)  # h_w[i]是第i个词被mask掉的得分
+            # _, h_w[i], adj = self.model(inputs, flag=True, mask_pos=i)  # h_w[i]是第i个词被mask掉的得分
+            h_w[i] = h_w[i][0].squeeze(0).cpu().detach().numpy()
+            for dim in range(len(hs)):  # 204维
+                r[i] += abs(hs[dim] - h_w[i][dim])
+            # r[i] = np.sum(r[i], axis=-1)
+        del r[0]
+        del r[-3:]
+        max_r = max(r)
+
+        r = [r[i] / max_r for i in range(length-4)]
+
+        print(r)
+        return r
