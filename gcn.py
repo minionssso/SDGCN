@@ -602,7 +602,7 @@ class MultiHeadGCN(nn.Module):
         self.W = nn.Linear(self.h_k, self.h_k, bias=False)  # 是否加bias
         self.drop = nn.Dropout(args.gcn_dropout)
 
-    def forward(self, adj, hidden, score_mask):
+    def forward(self, adj, hidden, score_mask, first_layer=True):
         bs = hidden.size(0)
         seq_len = hidden.size(1)
         score_mask = score_mask.unsqueeze(1).repeat(1, self.head_num, 1, 1)
@@ -613,7 +613,8 @@ class MultiHeadGCN(nn.Module):
         Ax = adj.matmul(sem_hidden)  # (4,32,41,102)
         AxW = self.W(Ax)
         AxW = AxW / denom
-        out = self.drop(F.relu(AxW))
+        out = F.relu(AxW)
+        out = out if first_layer else self.drop(out)
         out = torch.cat(torch.split(out, 1, dim=0), dim=-1).squeeze(0)  # 多头求平均也行
         return out
 

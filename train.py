@@ -18,7 +18,7 @@ from transformers import BertTokenizer
 warnings.filterwarnings('ignore')  # 忽略userwarning
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', type=str, default='Tweets', help='[Restaurants, Tweets, Laptops]')
+parser.add_argument('--dataset', type=str, default='MAMS', help='[Restaurants, Tweets, Laptops, MAMS]')
 parser.add_argument('--post_dim', type=int, default=30, help='Position embedding dimension.') # 30
 parser.add_argument('--pos_dim', type=int, default=30, help='Pos embedding dimension.')  # 30
 parser.add_argument('--dep_dim', type=int, default=30, help='Deprel embedding dimension')  # 30
@@ -38,16 +38,16 @@ parser.add_argument('--save_dir', type=str, default='./saved_models', help='Root
 parser.add_argument('--decay_epoch', type=int, default=5, help='Decay learning rate after this epoch.')
 parser.add_argument('--optimizer', type=str, default='Adam', help='Adma; SGD')
 parser.add_argument('--load_model', type=bool, default=False, help='load param or not')
-parser.add_argument('--load_model_path', type=str, default='./saved_models/best_model.pt', help='load model path')
+parser.add_argument('--load_model_path', type=str, default='./saved_models/BERT/Tweets/best_model_tweets_76.4205.pt', help='load model path')
 
 parser.add_argument('--lr', type=float, default=0.0001, help='learning rate.')
 # parser.add_argument('--final_lr', type=float, default=0.1, help='change sgd learning rate.')
 parser.add_argument('--seed', type=int, default=random.randint(0, 10000), help='random seed')  # random.randint(0, 10000) 990; lap 6950, t 9261
 parser.add_argument('--input_dropout', type=float, default=0.1, help='Input dropout rate.')
-parser.add_argument('--gcn_dropout', type=float, default=0.4, help='GCN layer dropout rate.')
-parser.add_argument('--mhsa_dropout', type=float, default=0.2, help='MHSA layer dropout rate.')
+parser.add_argument('--gcn_dropout', type=float, default=0.7, help='GCN layer dropout rate.')
+parser.add_argument('--mhsa_dropout', type=float, default=0.8, help='MHSA layer dropout rate.')
 parser.add_argument('--threshold', type=float, default=0.5, help='Threshold')
-parser.add_argument('--num_layers', type=int, default=3, help='Num of GCN layers.')
+parser.add_argument('--num_layers', type=int, default=1, help='Num of GCN layers.')
 parser.add_argument('--head_num', type=int, default=8, help='head_num must be divisible by hidden_dim')
 
 # bert
@@ -57,7 +57,7 @@ parser.add_argument('--bert_lr', type=float, default=5e-5, help='5e-5, 3e-5, 2e-
 parser.add_argument('--bert_model_dir', type=str, default='./bert_model', help='Root dir for loading pretrained bert')
 parser.add_argument('--DEVICE', type=int, default=0, help='The number of GPU')
 # dist_mask
-parser.add_argument('--sem_srd', type=int, default=2, help='set sem SRD')
+parser.add_argument('--sem_srd', type=int, default=4, help='set sem SRD')
 parser.add_argument('--syn_srd', type=int, default=3, help='set syn SRD')
 parser.add_argument('--local_sem_focus', type=str, default='sem_cdm', help='sem_cdm or sem_cdw or n')
 parser.add_argument('--local_syn_focus', type=str, default='syn_cdm', help='syn_cdm or syn_cdw or n')
@@ -102,7 +102,7 @@ if args.emb_type == "bert":
     args.tokenizer.model_max_length = 90
     args.emb_dim = 768
 
-fitlog.set_log_dir("logs/Dual_MGCN_MHSA/Tweets")         # TODO 设定日志存储的目录 logs/Dual_MGCN_MHSA/Rests Laptops Tweets
+fitlog.set_log_dir("logs/Dual_MGCN_MHSA/MAMS")         # TODO 设定日志存储的目录 logs/Dual_MGCN_MHSA/Rests Laptops Tweets MAMS
 for arg, value in sorted(six.iteritems(vars(args))):
     fitlog.add_hyper({arg: value})  # 记录ArgumentParser的参数
 

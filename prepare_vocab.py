@@ -12,7 +12,7 @@ VOCAB_PREFIX = ['[PAD]', '[UNK]']
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Prepare vocab for relation extraction.')
-    parser.add_argument('--dataset', type=str, default='Restaurants16', help='TACRED directory.')
+    parser.add_argument('--dataset', type=str, default='MAMS', help='TACRED directory.')
     parser.add_argument('--lower', default=True, help='If specified, lowercase all words.')
     parser.add_argument('--wv_file', default='./dataset/glove/glove.840B.300d.txt', help='GloVe vector file.')
     parser.add_argument('--wv_dim', type=int, default=300, help='GloVe vector dimension.')
@@ -39,7 +39,7 @@ def main():
     print("{} words loaded from glove.".format(len(glove_vocab)))
 
     print("building vocab...")
-    v = build_vocab(train_tokens+test_tokens, glove_vocab)
+    v = build_vocab(train_tokens+test_tokens, glove_vocab)  # v=list 4342; vocab built with 4342/4518 words.
 
     print("calculating oov...")
     datasets = {'train': train_tokens, 'test': test_tokens}
@@ -48,7 +48,7 @@ def main():
         print("{} oov: {}/{} ({:.2f}%)".format(dname, oov, total, oov*100.0/total))
     
     print("building embeddings...")
-    embedding = build_embedding(args.wv_file, v, args.wv_dim)
+    embedding = build_embedding(args.wv_file, v, args.wv_dim)  # <class 'tuple'>: (4342, 300)
     print("embedding size: {} x {}".format(*embedding.shape))
 
     print("dumping to files...")
