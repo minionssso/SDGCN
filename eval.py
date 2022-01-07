@@ -11,7 +11,8 @@ import torch
 from transformers import BertTokenizer
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', type=str, default='Restaurants')
+parser.add_argument('--dataset', type=str, default='Laptops', help='[Restaurants, Tweets, Laptops, MAMS]')
+parser.add_argument('--save_dir', type=str, default='./saved_models/Glove/Laptops/best_model_lap_77.1875.pt', help='Root dir for saving models.')
 parser.add_argument('--emb_dim', type=int, default=300, help='Word embedding dimension.')
 parser.add_argument('--post_dim', type=int, default=30, help='Position embedding dimension.')
 parser.add_argument('--pos_dim', type=int, default=30, help='Pos embedding dimension.')
@@ -23,19 +24,18 @@ parser.add_argument('--num_class', type=int, default=3, help='Num of sentiment c
 parser.add_argument('--lower', default=True, help='Lowercase all words.')
 parser.add_argument('--direct', default=False)
 parser.add_argument('--loop', default=True)
-parser.add_argument('--lr', type=float, default=0.001, help='learning rate.')
+parser.add_argument('--lr', type=float, default=0.0001, help='learning rate.')
 parser.add_argument('--l2reg', type=float, default=1e-5, help='l2 .')
-parser.add_argument('--num_epoch', type=int, default=100, help='Number of total training epochs.')
-parser.add_argument('--batch_size', type=int, default=2, help='Training batch size.')
+parser.add_argument('--num_epoch', type=int, default=200, help='Number of total training epochs.')
+parser.add_argument('--batch_size', type=int, default=32, help='Training batch size.')
 parser.add_argument('--log_step', type=int, default=80, help='Print log every k steps.')
 parser.add_argument('--log', type=str, default='logs.txt', help='Write training log to file.')
-parser.add_argument('--save_dir', type=str, default='./saved_models/BERT/best_model_rests_85.1498.pt', help='Root dir for saving models.')
 parser.add_argument('--optimizer', type=str, default='Adma', help='Adma; SGD')
 
-parser.add_argument('--threshold', type=float, default=0.3)
+parser.add_argument('--threshold', type=float, default=0.5)
 parser.add_argument('--head_num', default=4, type=int, help='head_num must be a multiple of 3')
 parser.add_argument('--num_layers', type=int, default=2, help='Num of GCN layers.')
-parser.add_argument('--input_dropout', type=float, default=0.7, help='Input dropout rate.')
+parser.add_argument('--input_dropout', type=float, default=0.1, help='Input dropout rate.')
 parser.add_argument('--gcn_dropout', type=float, default=0.2, help='GCN layer dropout rate.')
 parser.add_argument('--mhsa_dropout', type=float, default=0.6, help='MHSA layer dropout rate.')
 # dist_mask
@@ -45,6 +45,7 @@ parser.add_argument('--local_sem_focus', type=str, default='sem_cdm', help='sem_
 parser.add_argument('--local_syn_focus', type=str, default='syn_cdm', help='syn_cdm or syn_cdw or n')
 # shortcut
 parser.add_argument('--shortcut', type=bool, default=True, help='shortcut or not')
+parser.add_argument('--mhgcn', default=True, help='mhgcn or gcn')  # MHGCN--GCN
 
 # bert
 parser.add_argument('--emb_type', type=str, default='bert', help='[glove, bert]')
@@ -105,6 +106,8 @@ test_loss, test_acc, test_step = 0., 0., 0
 for i, batch in enumerate(test_batch):
     trainer.model.eval()
     loss, acc, pred, label, _, _ = trainer.predict(batch)
+    print('prediction:', pred)
+    print('label:', label)
     test_loss += loss
     test_acc += acc
     predictions += pred
@@ -113,5 +116,7 @@ for i, batch in enumerate(test_batch):
 f1_score = metrics.f1_score(labels, predictions, average='macro')
 
 print("test_loss: {}, test_acc: {}, f1_score: {}".format(test_loss/test_step, test_acc/test_step, f1_score))
+
+#  'polarity': {'positive': 0, 'negative': 1, 'neutral': 2}}
 
 

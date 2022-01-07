@@ -6,6 +6,8 @@ from gcn import GCNClassifier
 import math
 import adabound
 from copy import deepcopy
+from transformers import AdamW
+import torch.optim.adam as Adam
 
 
 class GCNTrainer(object):
@@ -13,9 +15,10 @@ class GCNTrainer(object):
         self.args = args
         self.emb_matrix = emb_matrix
         self.model = GCNClassifier(args, emb_matrix=emb_matrix).to(self.args.device)
+        # self.model = self.args.model_class(args, emb_matrix=emb_matrix).to(self.args.device)
         self.metric = 0
         if args.emb_type == 'bert':
-            bert_model = self.model.gcn_model.bert
+            bert_model = self.model.gcn_model.bert  # BertModel.from_pretrained(args.bert_model_dir, config=config, from_tf=False)
             bert_params_dict = list(map(id, bert_model.parameters()))
             base_params = filter(lambda p: id(p) not in bert_params_dict, self.model.parameters())
             self.parameters = [
@@ -24,9 +27,13 @@ class GCNTrainer(object):
             ]
         else:
             self.parameters = self.model.parameters()
+        # if args.emb_type == 'glove':
+        #     self._reset_params()
 
-        self.optimizer = torch.optim.Adam(
-            self.parameters, lr=args.lr, weight_decay=args.l2reg, amsgrad=True)
+        self.optimizer = AdamW(
+            self.parameters, lr=args.lr, weight_decay=args.l2reg)
+        # self.optimizer = Adam(
+        #     self.parameters, lr=args.lr, weight_decay=args.l2reg, amsgrad=True)
         # self.optimizer = torch.optim.SGD(self.parameters, lr=args.lr, momentum=0.9, weight_decay=args.l2reg)
         # self.optimizer = adabound.AdaBound(self.parameters, lr=args.lr, final_lr=args.final_lr)
 
@@ -53,6 +60,15 @@ class GCNTrainer(object):
             print("model saved to {}".format(filename))
         except BaseException:
             print("[Warning: Saving failed... continuing anyway.]")
+
+    def _reset_params(self):
+        for p in self.model.parameters():
+            if p.requires_grad:
+                if len(p.shape) > 1:
+                    self.args.initializer(p)  # xavier_uniform_
+                else:
+                    stdv = 1. / (p.shape[0] ** 0.5)
+                    torch.nn.init.uniform_(p, a=-stdv, b=stdv)
     # train
     def update(self, batch):
         if self.args.emb_type == "glove":
@@ -158,8 +174,11 @@ class GCNTrainer(object):
 
     def mask_exp(self, batch):
         # batch = [b.cuda() for b in batch]
-
-        inputs = batch[0:12]  # glove 0:10
+        if self.args.emb_type == "glove":
+            inputs = batch[0:10]
+        elif self.args.emb_type == "bert":
+            inputs = batch[0:12]
+        label = batch[-1]
         length = inputs[0].size(1)  # num of tokens
         self.model.eval()
         logits, h, h_syn, _ = self.model(inputs)  # conventional procedure   size of h:(1,50) logits:'positive': 0, 'negative': 1, 'neutral': 2
@@ -177,12 +196,8 @@ class GCNTrainer(object):
             h_w[i] = h_w[i][0].squeeze(0).cpu().detach().numpy()
             for dim in range(len(hs)):  # 204维
                 r[i] += abs(hs[dim] - h_w[i][dim])
-            # r[i] = np.sum(r[i], axis=-1)
-        del r[0]
-        del r[-3:]
         max_r = max(r)
-
-        r = [r[i] / max_r for i in range(length-4)]
+        r = [r[i] / max_r for i in range(length)]
 
         print(r)
         return r

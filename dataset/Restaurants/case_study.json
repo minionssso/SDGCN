@@ -1,18 +1,30 @@
 [
     {
         "token": [
-            "Great",
-            "food",
+            "The",
+            "falafal",
+            "was",
+            "rather",
+            "over",
+            "cooked",
+            "and",
+            "dried",
             "but",
             "the",
-            "service",
+            "chicken",
             "was",
-            "dreadful",
-            "!"
+            "fine",
+            "."
         ],
         "pos": [
-            "JJ",
+            "DT",
             "NN",
+            "VBD",
+            "RB",
+            "IN",
+            "VBN",
+            "CC",
+            "VBN",
             "CC",
             "DT",
             "NN",
@@ -22,40 +34,52 @@
         ],
         "head": [
             2,
-            7,
-            2,
-            5,
-            2,
-            7,
+            6,
+            6,
+            6,
+            6,
             0,
-            7
+            6,
+            6,
+            6,
+            11,
+            13,
+            13,
+            6,
+            6
         ],
         "deprel": [
-            "amod",
-            "nsubj",
+            "det",
+            "nsubjpass",
+            "auxpass",
+            "advmod",
+            "advmod",
+            "ROOT",
+            "cc",
+            "conj",
             "cc",
             "det",
-            "conj",
+            "nsubj",
             "cop",
-            "ROOT",
+            "conj",
             "punct"
         ],
         "aspects": [
             {
                 "term": [
-                    "food"
+                    "falafal"
                 ],
                 "from": 1,
                 "to": 2,
-                "polarity": "positive"
+                "polarity": "negative"
             },
             {
                 "term": [
-                    "service"
+                    "chicken"
                 ],
-                "from": 4,
-                "to": 5,
-                "polarity": "negative"
+                "from": 10,
+                "to": 11,
+                "polarity": "positive"
             }
         ]
     }

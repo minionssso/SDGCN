@@ -1,0 +1,67 @@
+[
+    {
+        "token": [
+            "Did",
+            "not",
+            "enjoy",
+            "the",
+            "new",
+            "Windows",
+            "8",
+            "and",
+            "touchscreen",
+            "functions",
+            "."
+        ],
+        "pos": [
+            "VBD",
+            "RB",
+            "VB",
+            "DT",
+            "JJ",
+            "NNP",
+            "CD",
+            "CC",
+            "NN",
+            "NNS",
+            "."
+        ],
+        "head": [
+            3,
+            3,
+            0,
+            6,
+            6,
+            3,
+            6,
+            6,
+            10,
+            6,
+            3
+        ],
+        "deprel": [
+            "aux",
+            "neg",
+            "ROOT",
+            "det",
+            "amod",
+            "dobj",
+            "nummod",
+            "cc",
+            "compound",
+            "conj",
+            "punct"
+        ],
+        "aspects": [
+            {
+                "term": [
+                    "Windows",
+                    "8"
+                ],
+                "from": 5,
+                "to": 7,
+                "polarity": "negative"
+            }
+        ]
+    }
+]
