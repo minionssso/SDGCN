@@ -18,6 +18,10 @@ from trainer import GCNTrainer
 import matplotlib.pyplot as plt
 from transformers import BertTokenizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts, StepLR
+from models.semmhsa import SemMHSAClassifier
+from models.syngcn import SynGCNClassifier
+from models.dssgcn import DSSGCNClassifier
+
 warnings.filterwarnings('ignore')  # 忽略userwarning
 os.environ['NUMEXPR_MAX_THREADS'] = '16'
 
@@ -25,23 +29,22 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler(sys.stdout))
 
-initializers = {
-        'xavier_uniform_': torch.nn.init.xavier_uniform_,
-        'xavier_normal_': torch.nn.init.xavier_normal_,
-        'orthogonal_': torch.nn.init.orthogonal_,
-    }
-
-# model_classes = {
-#         'syngcn': SynGCNClassifier,
-#         'semmha': SemMHSAClassifier,
-#         'ssdgcn': SSDGCNClassifier,
-#         'bert_spc': BERT_SPC
+# initializers = {
+#         'xavier_uniform_': torch.nn.init.xavier_uniform_,
+#         'xavier_normal_': torch.nn.init.xavier_normal_,
+#         'orthogonal_': torch.nn.init.orthogonal_,
 #     }
 
+model_classes = {
+        'syngcn': SynGCNClassifier,
+        'semmhsa': SemMHSAClassifier,
+        'dssgcn': DSSGCNClassifier
+        # 'bert_spc': BERT_SPC
+    }
+
 parser = argparse.ArgumentParser()
-# parser.add_argument('--model_name', default='syngcn', type=str,
-#                     help=', '.join(model_classes.keys()))  # syngcn, semmsa, ssdgcn
-parser.add_argument('--dataset', type=str, default='Tweets', help='[Restaurants, Tweets, Laptops, MAMS]')
+parser.add_argument('--model_name', default='dssgcn', type=str, help=', '.join(model_classes.keys()))  # syngcn, semmsa, dssgcn
+parser.add_argument('--dataset', type=str, default='Laptops', help='[Restaurants, Tweets, Laptops, MAMS]')
 parser.add_argument('--post_dim', type=int, default=30, help='Position embedding dimension.') # 30
 parser.add_argument('--pos_dim', type=int, default=30, help='Pos embedding dimension.')  # 30
 parser.add_argument('--dep_dim', type=int, default=30, help='Deprel embedding dimension')  # 30
@@ -60,9 +63,9 @@ parser.add_argument('--log', type=str, default='logs.txt', help='Write training 
 parser.add_argument('--save_dir', type=str, default='./saved_models', help='Root dir for saving models.')
 parser.add_argument('--decay_epoch', type=int, default=5, help='Decay learning rate after this epoch.')
 parser.add_argument('--optimizer', type=str, default='AdamW', help='Adam; SGD; AdamW')
-parser.add_argument('--initializer', default='xavier_uniform_', type=str, help=', '.join(initializers.keys()))
+# parser.add_argument('--initializer', default='xavier_uniform_', type=str, help=', '.join(initializers.keys()))
 parser.add_argument('--load_model', type=bool, default=False, help='load param or not')
-parser.add_argument('--load_model_path', type=str, default='./state_dict/Tweets_val_acc_76.5057.pt', help='load model path')  # 76.5057
+parser.add_argument('--load_model_path', type=str, default='./state_dict/Laptops_val_acc_81.1979.pt', help='load model path')  # tw:76.5057 MAMS:84.2262
 
 parser.add_argument('--gcn_dropout', type=float, default=0.5, help='GCN layer dropout rate.')
 parser.add_argument('--head_num', type=int, default=8, help='head_num must be divisible by hidden_dim')
@@ -70,7 +73,7 @@ parser.add_argument('--input_dropout', type=float, default=0.3, help='Input drop
 
 parser.add_argument('--lr', type=float, default=0.0001, help='learning rate.')
 parser.add_argument('--mhsa_dropout', type=float, default=0.5, help='MHSA layer dropout rate.')
-parser.add_argument('--num_layers', type=int, default=2, help='Num of GCN layers.')
+parser.add_argument('--num_layers', type=int, default=3, help='Num of GCN layers.')
 parser.add_argument('--seed', type=int, default=random.randint(0, 10000), help='random seed')  # random.randint(0, 10000) 3509,990; lap 9584, t 9261
 # dist mask
 parser.add_argument('--sem_srd', type=int, default=5, help='set sem SRD')
@@ -87,15 +90,15 @@ parser.add_argument('--DEVICE', type=int, default=0, help='The number of GPU')
 
 # 消融
 parser.add_argument('--mhgcn', default=True, help='mhgcn or gcn')  # MHGCN--GCN
-parser.add_argument('--local_syn_focus', type=str, default='syn_cdm', help='syn_cdm or syn_cdw or n')  # Syn mask
+parser.add_argument('--local_syn_focus', type=str, default='n', help='syn_cdm or syn_cdw or n')  # Syn mask
 parser.add_argument('--local_sem_focus', type=str, default='sem_cdm', help='sem_cdm or sem_cdw or n')  # Sem mask
 # shortcut
 parser.add_argument('--shortcut', type=bool, default=True, help='shortcut or not')
 args = parser.parse_args()
 
-# args.model_class = model_classes[args.model_name]
+args.model_class = model_classes[args.model_name]
 
-args.initializer = initializers[args.initializer]
+# args.initializer = initializers[args.initializer]
 
 # set device
 args.device = torch.device("cuda:{}".format(args.DEVICE) if torch.cuda.is_available() else "cpu")
@@ -166,7 +169,7 @@ test_batch = [batch for batch in DataLoader(
                 './dataset/'+args.dataset+'/test.json', args.batch_size, args, dicts)]
 # 当实例对象通过[]运算符取值时，会调用它的__getitem__()
 # create the folder for saving the best models and log file
-model_save_dir = args.save_dir + '/' + args.dataset
+model_save_dir = args.save_dir + '/' + args.model_name + '/' + args.dataset  # ./saved_models/Laptops
 helper.ensure_dir(model_save_dir, verbose=True)
 file_logger = helper.FileLogger(model_save_dir + '/' + args.log,
                                 header="#poch\ttrain_loss\ttest_loss\ttrain_acc\ttest_acc\ttest_f1")
@@ -249,23 +252,25 @@ for epoch in range(1, args.num_epoch+1):
 
     # save best model
     if epoch == 1 or test_acc/test_step > max(test_acc_history):
-        if not os.path.exists('state_dict'):
-            os.mkdir('state_dict')
-        path = 'state_dict/{0}_val_acc_{1}.pt'.format(args.dataset, round(test_acc/test_step, 4))
-        trainer.save(path)  # save
-        logger.info('>> saved: {}'.format(path))
+        if test_acc/test_step > 80.0:
+            if not os.path.exists('state_dict'):
+                os.mkdir('state_dict')
+            path = 'state_dict/{0}_{1}_val_acc_{2}.pt'.format(args.model_name, args.dataset, round(test_acc/test_step, 4))
+            trainer.save(path)  # save
+            logger.info('>> saved: {}'.format(path))
 
-        print("new best model saved.")
-        file_logger.log("new best model saved at epoch {}: {:.6f}\t{:.6f}\t{:.6f}\t{:.6f}\t{:.6f}"
-            .format(epoch, train_loss/train_step, test_loss/test_step,
-                    train_acc/train_step, test_acc/test_step, f1_score))
+            print("new best model saved.")
+            file_logger.log("new best model saved at epoch {}: {:.6f}\t{:.6f}\t{:.6f}\t{:.6f}\t{:.6f}"
+                .format(epoch, train_loss/train_step, test_loss/test_step,
+                        train_acc/train_step, test_acc/test_step, f1_score))
+
         adjust_lr_signal = 0
 
         # figlog
         fitlog.add_best_metric({"test": {"best_Acc": test_acc / test_step}})
         fitlog.add_best_metric({"test": {"best_f1": f1_score}})
 
-    if adjust_lr_signal > 7:
+    if adjust_lr_signal > 5:
         print('stop training')
         break
 

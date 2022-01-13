@@ -15,33 +15,33 @@ do
     while [ `expr $l2reg \> .000001` -eq 1 ]
     do
       num_layers=1
-      while [ $num_layers -le 3 ]
+      while [ $num_layers -le 2 ]
       do
         head_num=4
         while [ $head_num -le 4 ]
         do
-          gcn_dropout=.50
-          while [ `expr .60 \> $gcn_dropout` -eq 1 ]
+          gcn_dropout=.10
+          while [ `expr .90 \> $gcn_dropout` -eq 1 ]
           do
-            mhsa_dropout=.60
-            while [ `expr .70 \> $mhsa_dropout` -eq 1 ]
+            mhsa_dropout=.10
+            while [ `expr .90 \> $mhsa_dropout` -eq 1 ]
             do
               threshold=.50
               while [ `expr .60 \> $threshold` -eq 1 ]
               do
-                syn_srd=0
-                while [ $syn_srd -le 9 ]
+                syn_srd=5
+                while [ $syn_srd -le 5 ]
                 do
-                  sem_srd=0
-                  while [ $sem_srd -le 9 ]
+                  sem_srd=4
+                  while [ $sem_srd -le 4 ]
                   do
                     if [ $idx -ge $start ] && [ $idx -le $end ];then
                         printf "idx:%d lr:%1.5f bert_lr:%1.6f l2reg:%1.5f num_layers:%d head_num:%d gcn_dropout:%1.2f mhsa_dropout:%1.2f syn_srd:%d sem_srd:%d \n" \
                           $idx $lr ${bert_lr[i]} $l2reg $num_layers $head_num $gcn_dropout $mhsa_dropout $syn_srd $sem_srd
 
-                        python -u train.py --num_epoch 200 --DEVICE 0 --gcn_dropout $gcn_dropout --l2reg $l2reg --mhsa_dropout $mhsa_dropout \
+                        python -u train.py --model_name dssgcn --num_epoch 200 --DEVICE 0 --gcn_dropout $gcn_dropout --l2reg $l2reg --mhsa_dropout $mhsa_dropout \
                           --threshold $threshold --lr $lr --dataset MAMS --hidden_dim 204 --rnn_hidden 204 --syn_srd $syn_srd --sem_srd $sem_srd \
-                          --num_layers $num_layers --emb_type bert --log_step 40 --head_num $head_num --batch_size 32  \
+                          --num_layers $num_layers --emb_type bert --log_step 40 --head_num $head_num --batch_size 32 \
                           > ./out_mams_bert/$idx.out 2>&1
                     fi
 

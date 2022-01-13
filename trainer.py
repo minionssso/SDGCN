@@ -8,13 +8,22 @@ import adabound
 from copy import deepcopy
 from transformers import AdamW
 import torch.optim.adam as Adam
+from models.semmhsa import SemMHSAClassifier
+from models.syngcn import SynGCNClassifier
+from models.dssgcn import DSSGCNClassifier
 
 
 class GCNTrainer(object):
     def __init__(self, args, emb_matrix=None):
         self.args = args
         self.emb_matrix = emb_matrix
-        self.model = GCNClassifier(args, emb_matrix=emb_matrix).to(self.args.device)
+        if args.model_name == 'syngcn':
+            self.model = SynGCNClassifier(args, emb_matrix=emb_matrix).to(self.args.device)
+        if args.model_name == 'semmhsa':
+            self.model = SemMHSAClassifier(args, emb_matrix=emb_matrix).to(self.args.device)
+        if args.model_name == 'dssgcn':
+            self.model = DSSGCNClassifier(args, emb_matrix=emb_matrix).to(self.args.device)
+        # self.model = GCNClassifier(args, emb_matrix=emb_matrix).to(self.args.device)
         # self.model = self.args.model_class(args, emb_matrix=emb_matrix).to(self.args.device)
         self.metric = 0
         if args.emb_type == 'bert':

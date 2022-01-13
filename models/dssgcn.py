@@ -11,9 +11,9 @@ from tree import Tree, head_to_tree, tree_to_adj
 from transformers import BertModel, BertConfig, BertPreTrainedModel, BertTokenizer
 
 
-class GCNClassifier(nn.Module):
+class DSSGCNClassifier(nn.Module):
     def __init__(self, args, emb_matrix=None):
-        super(GCNClassifier, self).__init__()
+        super(DSSGCNClassifier, self).__init__()
         self.args = args
         self.in_dim = args.hidden_dim
         self.gcn_model = GCNAbsaModel(args, emb_matrix=emb_matrix)
@@ -267,7 +267,7 @@ class GCNAbsaModel(nn.Module):
         # mask h_sem_res = local + global
         if self.args.local_sem_focus == 'sem_cdm':
             masked_sem_vec = self.feature_dynamic_mask(h_sem_res[0], asp, asp_mask)
-            h_sem_mask.append(torch.mul(h_sem_res[0], masked_sem_vec))
+            h_sem_res[0] = torch.mul(h_sem_res[0], masked_sem_vec)
             # local_h_sem = torch.mul(h_sem_res[0], masked_sem_vec)
             # h_sem_res[0] = torch.cat((h_sem_res[0], local_h_sem), dim=-1)
             # # h_sem_res[0] = self.sem_mean_pool(h_sem_res[0])
@@ -275,7 +275,7 @@ class GCNAbsaModel(nn.Module):
 
         if self.args.local_syn_focus == 'syn_cdm':
             masked_syn_vec = self.feature_dynamic_mask(h_syn_res[0], asp, distances_input=dist)
-            h_syn_mask.append(torch.mul(h_syn_res[0], masked_syn_vec))
+            h_syn_res[0] = torch.mul(h_syn_res[0], masked_syn_vec)
             # local_h_syn = torch.mul(h_syn_res[0], masked_syn_vec)
             # h_syn_res[0] = torch.cat((h_syn_res[0], local_h_syn), dim=-1)  # 方案2
             # # h_syn[0] = self.syn_mean_pool(h_syn_global_local)
@@ -303,15 +303,15 @@ class GCNAbsaModel(nn.Module):
             h_sem.append(self.mhsa_sem[i+1](h_sem_res[i], h_sem_res[i], score_mask))
             h_sem[i+1] = self.ffn_sem[i+1](h_sem[i+1])
             if self.args.shortcut:
-                h_syn_res.append(hidden + h_syn_res[i] + h_syn[i+1] + h_syn_mask[0])
-                h_sem_res.append(hidden + h_sem_res[i] + h_sem[i+1] + h_sem_mask[0])
-                # h_syn_res.append(hidden + h_syn_res[i] + h_syn[i + 1])
-                # h_sem_res.append(hidden + h_sem_res[i] + h_sem[i+1])
+                # h_syn_res.append(hidden + h_syn_res[i] + h_syn[i+1] + h_syn_mask[0])
+                # h_sem_res.append(hidden + h_sem_res[i] + h_sem[i+1] + h_sem_mask[0])
+                h_syn_res.append(hidden + h_syn_res[i] + h_syn[i + 1])
+                h_sem_res.append(hidden + h_sem_res[i] + h_sem[i+1])
             else:
-                h_syn_res.append(h_syn[i+1] + h_syn_mask[0])
-                h_sem_res.append(h_sem[i+1] + h_sem_mask[0])
-                # h_syn_res.append(h_syn[i + 1])
-                # h_sem_res.append(h_sem[i + 1])
+                # h_syn_res.append(h_syn[i+1] + h_syn_mask[i])
+                # h_sem_res.append(h_sem[i+1] + h_sem_mask[i])
+                h_syn_res.append(h_syn[i + 1])
+                h_sem_res.append(h_sem[i + 1])
         # h_final = torch.cat((h_syn_final, h_sem_final), dim=-1)
         h_syn_pool = torch.div(torch.sum(h_syn_res[-1], dim=1), length.view(length.size(0), 1))
         h_sem_pool = torch.div(torch.sum(h_sem_res[-1], dim=1), length.view(length.size(0), 1))
